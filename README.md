@@ -1,6 +1,16 @@
 # docling-context
 
 A local context tree that stores documents as immutable DocLang `.dclx` packages.
+
+Ingest native `.dclg`, `.dclg.xml`, and `.dclx` sources with `Ingestor.add_resource`.
+Pass bytes with a filename, or a local `Path` under an explicit `allowed_roots` entry.
+Each revision stores its full document, a short DocLang summary, and a DocLang TOC
+in one DCLX package. Collection summaries are rebuilt by `CollectionWorker`;
+`CollectionWorker.status` reports whether a summary is stale.
+
+PDF conversion is local and optional: install the `conversion` extra to enable
+`LocalDoclingConverter`. `DoclingServeConverter` requires an explicit HTTPS
+endpoint or loopback HTTP endpoint.
 SQLite tracks logical URIs, revisions, tenant ownership, and an append-only change
 outbox. Package bytes live under SHA-256 paths. The API is designed so another
 storage backend can implement the same contracts later.
@@ -15,7 +25,7 @@ published `doclang` package, which may not yet have the required native API.
 
 ```bash
 uv sync
-uv run pytest -q tests/test_step1.py
+uv run pytest -q tests
 ```
 
 ## Local usage
@@ -33,6 +43,26 @@ with LocalContextStore("./context-data") as store:
     record = store.put(principal, "docling://resources/manuals/hello", package)
     citation = NodeAddress(record.document_id, record.revision_id, "/doclang[1]/text[1]")
     print(store.read_node(principal, citation).text)
+```
+
+For ingestion, allow the source directory explicitly and then process queued
+collection summaries. A worker can call `run_forever(stop_event)` in its own
+process with its own store connection.
+
+```python
+from pathlib import Path
+from docling_context import CollectionWorker, Ingestor, LocalContextStore, Principal
+
+principal = Principal("acme", "alice")
+source_dir = Path("./documents").resolve()
+with LocalContextStore("./context-data") as store:
+    record = Ingestor(store, allowed_roots=(source_dir,)).add_resource(
+        principal, "docling://resources/manuals/guide", source_dir / "guide.dclx"
+    )
+    worker = CollectionWorker(store)
+    while worker.run_once() is not None:
+        pass
+    print(worker.status(principal, "docling://resources/manuals"))
 ```
 
 Document URIs use `docling://resources/{collection}/{path}` or

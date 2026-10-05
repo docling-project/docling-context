@@ -70,12 +70,11 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 1:
+        if version > 2:
             raise RuntimeError("database schema is newer than this library")
-        if version == 1:
-            return
-        self.db.executescript(
-            """BEGIN IMMEDIATE;
+        if version == 0:
+            self.db.executescript(
+                """BEGIN IMMEDIATE;
                 CREATE TABLE documents (
                   tenant_id TEXT NOT NULL, uri TEXT NOT NULL, document_id TEXT NOT NULL,
                   revision_id TEXT NOT NULL, package_hash TEXT NOT NULL,
@@ -102,6 +101,100 @@ class LocalContextStore:
                 PRAGMA user_version = 1;
                 COMMIT;
                 """
+            )
+        if version < 2:
+            self.db.executescript(
+                """BEGIN IMMEDIATE;
+                CREATE TABLE collection_status (
+                  tenant_id TEXT NOT NULL, collection_uri TEXT NOT NULL,
+                  stale INTEGER NOT NULL DEFAULT 1, latest_event INTEGER NOT NULL,
+                  summary_revision TEXT,
+                  PRIMARY KEY (tenant_id, collection_uri)
+                );
+                CREATE TABLE jobs (
+                  job_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+                  collection_uri TEXT NOT NULL, input_revision TEXT NOT NULL,
+                  input_event INTEGER NOT NULL UNIQUE,
+                  status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                  retry_at TEXT NOT NULL, lease_until TEXT, last_error TEXT,
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX jobs_due ON jobs (status, retry_at, lease_until);
+                """
+            )
+            try:
+                if version == 1:
+                    collections: dict[tuple[str, str], tuple[str, str]] = {}
+                    for row in self.db.execute(
+                        "SELECT tenant_id,uri,revision_id FROM documents WHERE available=1"
+                    ):
+                        address = parse_uri(row["uri"])
+                        if address.namespace == "resources" and address.segments[
+                            1:
+                        ] != (
+                            "_context",
+                            "summary",
+                        ):
+                            key = (
+                                row["tenant_id"],
+                                f"docling://resources/{address.segments[0]}",
+                            )
+                            collections[key] = (row["uri"], row["revision_id"])
+                    for (tenant_id, collection_uri), (
+                        uri,
+                        revision_id,
+                    ) in collections.items():
+                        prefix = collection_uri + "/"
+                        event = self.db.execute(
+                            """SELECT sequence FROM outbox WHERE tenant_id=?
+                               AND substr(uri,1,?)=? ORDER BY sequence DESC LIMIT 1""",
+                            (tenant_id, len(prefix), prefix),
+                        ).fetchone()
+                        if event is not None:
+                            self._queue_collection(
+                                Principal(tenant_id, "migration"),
+                                uri,
+                                revision_id,
+                                event["sequence"],
+                                _now(),
+                            )
+                self.db.execute("PRAGMA user_version = 2")
+                self.db.execute("COMMIT")
+            except BaseException:
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
+                raise
+
+    def _queue_collection(
+        self, principal: Principal, uri: str, revision_id: str, event: int, now: str
+    ) -> None:
+        address = parse_uri(uri)
+        if address.namespace != "resources" or address.segments[1:] == (
+            "_context",
+            "summary",
+        ):
+            return
+        collection_uri = f"docling://resources/{address.segments[0]}"
+        self.db.execute(
+            """INSERT INTO collection_status (tenant_id,collection_uri,stale,latest_event)
+               VALUES (?,?,1,?) ON CONFLICT(tenant_id,collection_uri)
+               DO UPDATE SET stale=1,latest_event=excluded.latest_event""",
+            (principal.tenant_id, collection_uri, event),
+        )
+        self.db.execute(
+            """INSERT INTO jobs
+               (job_id,tenant_id,collection_uri,input_revision,input_event,status,retry_at,created_at,updated_at)
+               VALUES (?,?,?,?,?,'queued',?,?,?)""",
+            (
+                uuid.uuid4().hex,
+                principal.tenant_id,
+                collection_uri,
+                revision_id,
+                event,
+                now,
+                now,
+                now,
+            ),
         )
 
     @contextmanager
@@ -144,6 +237,7 @@ class LocalContextStore:
         *,
         expected_revision: str | None = None,
         source: dict | None = None,
+        revision_id: str | None = None,
     ) -> DocumentRecord:
         address = parse_uri(uri)
         authorize_uri(principal, address)
@@ -166,7 +260,11 @@ class LocalContextStore:
                     raise RevisionConflict("revision changed")
                 document_id = current["document_id"]
                 created_at = current["created_at"]
-            revision_id = uuid.uuid4().hex
+            revision_id = revision_id or uuid.uuid4().hex
+            if len(revision_id) != 32 or any(
+                c not in "0123456789abcdef" for c in revision_id
+            ):
+                raise ValueError("revision_id must be a lowercase UUID hex string")
             values = (
                 principal.tenant_id,
                 canonical,
@@ -195,10 +293,14 @@ class LocalContextStore:
                   updated_at=excluded.updated_at, available=1""",
                 values,
             )
-            self.db.execute(
+            cursor = self.db.execute(
                 "INSERT INTO outbox (tenant_id,uri,document_id,revision_id,operation,occurred_at) "
                 "VALUES (?,?,?,?,?,?)",
                 (principal.tenant_id, canonical, document_id, revision_id, "put", now),
+            )
+            assert cursor.lastrowid is not None
+            self._queue_collection(
+                principal, canonical, revision_id, cursor.lastrowid, now
             )
         return self.get_record(principal, canonical)
 
@@ -251,7 +353,7 @@ class LocalContextStore:
                 "DELETE FROM documents WHERE tenant_id=? AND uri=?",
                 (principal.tenant_id, address.value),
             )
-            self.db.execute(
+            cursor = self.db.execute(
                 "INSERT INTO outbox (tenant_id,uri,document_id,revision_id,operation,occurred_at) "
                 "VALUES (?,?,?,?,?,?)",
                 (
@@ -262,6 +364,14 @@ class LocalContextStore:
                     "delete",
                     _now(),
                 ),
+            )
+            assert cursor.lastrowid is not None
+            self._queue_collection(
+                principal,
+                address.value,
+                current["revision_id"],
+                cursor.lastrowid,
+                _now(),
             )
 
     def _tree(

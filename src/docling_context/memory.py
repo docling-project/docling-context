@@ -34,6 +34,7 @@ class MemoryContextStore:
         *,
         expected_revision: str | None = None,
         source: dict | None = None,
+        revision_id: str | None = None,
     ) -> DocumentRecord:
         address = parse_uri(uri)
         authorize_uri(principal, address)
@@ -46,11 +47,16 @@ class MemoryContextStore:
             raise RevisionConflict("revision changed")
         digest = hashlib.sha256(package).hexdigest()
         now = datetime.now(UTC).isoformat()
+        revision_id = revision_id or uuid.uuid4().hex
+        if len(revision_id) != 32 or any(
+            c not in "0123456789abcdef" for c in revision_id
+        ):
+            raise ValueError("revision_id must be a lowercase UUID hex string")
         record = DocumentRecord(
             address.value,
             principal.tenant_id,
             current.document_id if current else uuid.uuid4().hex,
-            uuid.uuid4().hex,
+            revision_id,
             PackageRef(digest, len(package)),
             address.parent,
             source or {},

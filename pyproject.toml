@@ -21,6 +21,9 @@ classifiers = [
 ]
 dependencies = ["doclang"]
 
+[project.optional-dependencies]
+conversion = ["docling>=2.133,<3"]
+
 [project.urls]
 Repository = "https://github.com/docling-project/docling-context"
 
