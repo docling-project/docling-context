@@ -1,0 +1,19 @@
+codecov:
+  allow_coverage_offsets: true
+
+coverage:
+  status:
+    project:
+      default:
+        informational: true
+        target: auto
+        if_ci_failed: success
+        flags:
+          - docling-context
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false
+  branches:
+    - main

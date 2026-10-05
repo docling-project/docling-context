@@ -1,0 +1,18 @@
+merge_protections:
+  - name: Enforce conventional commit titles
+    description: Require a conventional commit title for pull requests into main.
+    if:
+      - base = main
+    success_conditions:
+      - 'title ~= ^(fix|feat|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?(!)?:'
+
+  - name: Require two reviews for test changes
+    description: Test changes need two approving reviews.
+    if:
+      - base = main
+      - files ~= ^tests/
+    success_conditions:
+      - "#approved-reviews-by >= 2"
+
+merge_protections_settings:
+  reporting_method: check-runs
