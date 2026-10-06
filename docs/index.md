@@ -13,12 +13,14 @@ them through local Python and `dc` command-line APIs.
 | Conversion | Typed PDF and image settings for OCR, tables, charts, enrichment, images, and limits |
 | Remote conversion | Opt-in Docling Serve adapter; explicit endpoint and bounded response |
 | Inspection | `dc status`, `ls`, `tree`, and task status |
-| Search | `dc find` and `grep` provide bounded lexical scans of current documents |
+| Search | `dc search` provides scoped lexical, vector, and hybrid retrieval, including picture assets with an image-capable model |
 
-Search currently scans stored documents and has no semantic ranking or vector
-index. The indexed retrieval work is planned separately.
+`find` and `grep` retain their bounded substring scans. Indexed retrieval
+verifies citations against the current DCLX revision before returning text.
 
 - [Conversion settings](conversion.md)
+- [Scoped retrieval](retrieval.md)
+- [Retrieval benchmark](../examples/retrieval/benchmark_corpus.py)
 - [CLI commands](cli.md)
 - [Storage and jobs](storage.md)
 - [Single PDF and folder examples](../examples/adding_resources/README.md)

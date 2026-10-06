@@ -2,7 +2,8 @@
 
 A local context tree that stores documents as immutable DocLang `.dclx` packages.
 
-See the [capability guide](docs/index.md), [CLI reference](docs/cli.md), and
+See the [capability guide](docs/index.md), [retrieval guide](docs/retrieval.md),
+[CLI reference](docs/cli.md), and
 [single PDF and folder examples](examples/adding_resources/README.md).
 
 Ingest native `.dclg`, `.dclg.xml`, and `.dclx` sources with `Ingestor.add_resource`.
@@ -40,11 +41,19 @@ uv run dc --store ./context-data add-resource ./paper.pdf --collection papers --
 uv run dc --store ./context-data add-resource ./documents -r --from docx --from image
 uv run dc --store ./context-data worker --once
 uv run dc --store ./context-data tree docling://resources/papers -L 2
+uv run dc --store ./context-data index status
+uv run dc --store ./context-data search "invoice" --uri docling://resources/papers
+uv run --extra vectors dc --store ./context-data index vector rebuild
+uv run --extra vectors dc --store ./context-data search "invoice" --mode hybrid
 ```
 
 Use `uv run dc` or activate the project environment before running `dc` by
 itself; some systems also provide a calculator named `dc`. See the
 [full CLI guide](docs/cli.md) and [resource examples](examples/adding_resources/README.md).
+Ingestion builds the lexical index automatically. Vector indexing is optional;
+the `vectors` extra provides local embeddings and `dc index vector rebuild`.
+`dc index lex rebuild` reconstructs search records from stored DCLX packages.
+Search results cite exact source nodes or `@summary:` and `@toc:` sidecars.
 
 ## Local usage
 

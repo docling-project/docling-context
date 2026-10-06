@@ -7,7 +7,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from doclang import ArchiveLimits, DocLangXDocument
+from doclang import ArchiveLimits, DoclangDocument, DocLangXDocument
 from doclang.types import DoclangNodeRecord
 
 from .models import NodeAddress, NodeContent
@@ -38,7 +38,7 @@ def _limits() -> ArchiveLimits:
 
 
 def bounded_nodes(
-    document: DocLangXDocument,
+    document: DoclangDocument,
     *,
     xpath: str | None = None,
     limit: int = 1_000,
