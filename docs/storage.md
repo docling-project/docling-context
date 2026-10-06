@@ -24,5 +24,23 @@ with leases, retries failures, and can resume after a crash without adding a
 duplicate summary revision. Its `status` method exposes staleness and the
 summary revision ID.
 
+Schema version 3 adds `retrieval_units`, an FTS table, and `vector_state`.
+Schema version 4 adds `vector_members`, which records the stable IDs in each
+snapshot so later outbox events can remove replaced or deleted nodes.
+Schema version 5 records picture asset paths on retrieval units. Existing
+stores can run `dc index lex rebuild` to add picture units from saved DCLX
+packages, then `dc index vector rebuild` to embed them with an image-capable
+model.
+Schema version 6 records each source node's active heading in `section_xpath`.
+Rebuild the lexical index after upgrading an existing store to populate that
+field for previously indexed nodes.
+Document writes replace their retrieval records in the same SQLite transaction
+as the revision and outbox event; deletes remove those records. Existing stores
+are backfilled from their DCLX packages on upgrade. The FTS table is a
+rebuildable lexical projection. Optional vector snapshots are held in
+`vectors-{generation}.tvim` files and can be reconstructed from SQLite
+embedding bytes. The package and current revision remain authoritative for
+all citations.
+
 The local and in-memory stores implement the same basic `ContextStore`
 contract, leaving room for another storage backend later.

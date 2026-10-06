@@ -1,4 +1,4 @@
-"""Step 1 storage and native API contract checks."""
+"""Storage, URI, revision, and native package contracts."""
 
 from __future__ import annotations
 

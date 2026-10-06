@@ -133,10 +133,13 @@ def test_cli_import_worker_inspection_and_lexical_lookup(tmp_path, capsys):
     assert added["uri"] == "docling://resources/manuals/guide"
     assert added["task_id"]
     assert main(base + ["task", "status", added["task_id"]]) == 0
+    task_table = capsys.readouterr().out
+    assert "Field" in task_table and "Status" in task_table and "queued" in task_table
+    assert main(base + ["task", "status", added["task_id"], "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "queued"
     assert main(base + ["worker", "--once"]) == 0
     capsys.readouterr()
-    assert main(base + ["task", "status", added["task_id"]]) == 0
+    assert main(base + ["task", "status", added["task_id"], "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "complete"
     assert main(base + ["ls", "docling://resources/"]) == 0
     assert "docling://resources/manuals" in capsys.readouterr().out
@@ -149,6 +152,9 @@ def test_cli_import_worker_inspection_and_lexical_lookup(tmp_path, capsys):
     assert main(base + ["grep", "blue", "--uri", "docling://resources/manuals"]) == 0
     assert "Blue glaciers" in capsys.readouterr().out
     assert main(base + ["status"]) == 0
+    store_table = capsys.readouterr().out
+    assert "Field" in store_table and "Documents" in store_table
+    assert main(base + ["status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["documents"] == 2
 
 

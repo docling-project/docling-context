@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
@@ -26,6 +26,7 @@ from .package import (
     load_package,
     read_node,
 )
+from .retrieval import index_package, remove_index_records
 from .uri import AccessDenied, authorize_uri, parse_uri
 
 MAX_TREE_LIMIT = 1_000
@@ -70,7 +71,7 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 2:
+        if version > 6:
             raise RuntimeError("database schema is newer than this library")
         if version == 0:
             self.db.executescript(
@@ -164,6 +165,171 @@ class LocalContextStore:
                 if self.db.in_transaction:
                     self.db.execute("ROLLBACK")
                 raise
+        if version < 3:
+            try:
+                self.db.execute("CREATE VIRTUAL TABLE temp.fts_probe USING fts5(text)")
+            except sqlite3.OperationalError:
+                fts_module = "fts3"
+            else:
+                fts_module = "fts5"
+                self.db.execute("DROP TABLE temp.fts_probe")
+            self.db.executescript(
+                f"""BEGIN IMMEDIATE;
+                CREATE TABLE retrieval_units (
+                  vector_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  tenant_id TEXT NOT NULL, uri TEXT NOT NULL,
+                  document_id TEXT NOT NULL, revision_id TEXT NOT NULL,
+                  xpath TEXT NOT NULL, parent_xpath TEXT,
+                  tier INTEGER NOT NULL, page INTEGER, bbox_json TEXT,
+                  text TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  model_id TEXT, dimensions INTEGER, normalization TEXT,
+                  input_hash TEXT, index_generation TEXT, embedding BLOB,
+                  UNIQUE (tenant_id, uri, revision_id, xpath)
+                );
+                CREATE INDEX retrieval_scope ON retrieval_units
+                  (tenant_id, uri, revision_id, tier, xpath);
+                CREATE VIRTUAL TABLE retrieval_fts USING {fts_module}(text);
+                CREATE TABLE vector_state (
+                  singleton INTEGER PRIMARY KEY CHECK (singleton=1),
+                  generation TEXT NOT NULL, model_id TEXT NOT NULL,
+                  dimensions INTEGER NOT NULL, normalization TEXT NOT NULL,
+                  outbox_offset INTEGER NOT NULL, snapshot_hash TEXT NOT NULL
+                );
+                PRAGMA user_version = 3;
+                COMMIT;
+                """
+            )
+        if version < 4:
+            self.db.executescript(
+                """BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS vector_members (
+                  generation TEXT NOT NULL, tenant_id TEXT NOT NULL,
+                  uri TEXT NOT NULL, vector_id INTEGER NOT NULL,
+                  PRIMARY KEY (generation, vector_id)
+                );
+                CREATE INDEX IF NOT EXISTS vector_members_uri ON vector_members
+                  (generation, tenant_id, uri);
+                PRAGMA user_version = 4;
+                COMMIT;
+                """
+            )
+        if version < 5:
+            columns = {
+                row["name"]
+                for row in self.db.execute("PRAGMA table_info(retrieval_units)")
+            }
+            if "asset_path" not in columns:
+                self.db.execute(
+                    "ALTER TABLE retrieval_units ADD COLUMN asset_path TEXT"
+                )
+            self.db.execute("PRAGMA user_version = 5")
+        if version < 6:
+            columns = {
+                row["name"]
+                for row in self.db.execute("PRAGMA table_info(retrieval_units)")
+            }
+            if "section_xpath" not in columns:
+                self.db.execute(
+                    "ALTER TABLE retrieval_units ADD COLUMN section_xpath TEXT"
+                )
+            self.db.execute("PRAGMA user_version = 6")
+        self._backfill_retrieval()
+
+    def _backfill_retrieval(self) -> None:
+        rows = self.db.execute(
+            """SELECT d.* FROM documents d WHERE d.available=1 AND NOT EXISTS (
+                 SELECT 1 FROM retrieval_units r WHERE r.tenant_id=d.tenant_id
+                 AND r.uri=d.uri AND r.revision_id=d.revision_id)"""
+        ).fetchall()
+        for row in rows:
+            try:
+                package = self.packages.get(row["package_hash"])
+                with self.transaction():
+                    index_package(self.db, self._record(row), package)
+                    self.db.execute("UPDATE vector_state SET outbox_offset=-1")
+            except (PackageMissing, PackageError):
+                continue
+
+    def index_status(self, principal: Principal) -> dict[str, int | str | None]:
+        """Report the current, authorized retrieval projection."""
+        rows = self.db.execute(
+            "SELECT uri,revision_id FROM documents WHERE tenant_id=? AND available=1",
+            (principal.tenant_id,),
+        ).fetchall()
+        visible = [row for row in rows if self._can_access(principal, row["uri"])]
+        indexed = units = embedded = 0
+        for row in visible:
+            count, with_embeddings = self.db.execute(
+                """SELECT COUNT(*),COUNT(embedding) FROM retrieval_units
+                   WHERE tenant_id=? AND uri=? AND revision_id=?""",
+                (principal.tenant_id, row["uri"], row["revision_id"]),
+            ).fetchone()
+            indexed += count > 0
+            units += count
+            embedded += with_embeddings
+        state = self.db.execute(
+            "SELECT model_id,outbox_offset FROM vector_state WHERE singleton=1"
+        ).fetchone()
+        offset = self.db.execute(
+            "SELECT COALESCE(MAX(sequence),0) FROM outbox"
+        ).fetchone()[0]
+        return {
+            "documents": len(visible),
+            "indexed_documents": indexed,
+            "indexed_nodes": units,
+            "embedded_nodes": embedded,
+            "vector_model": state["model_id"] if state else None,
+            "vector_snapshot_current": bool(state and state["outbox_offset"] == offset),
+        }
+
+    def rebuild_index(
+        self,
+        principal: Principal,
+        *,
+        progress: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int | str | None]:
+        """Recreate authorized retrieval rows from stored DCLX packages."""
+        rows = self.db.execute(
+            "SELECT * FROM documents WHERE tenant_id=? AND available=1 ORDER BY uri",
+            (principal.tenant_id,),
+        ).fetchall()
+        visible = [row for row in rows if self._can_access(principal, row["uri"])]
+        rebuilt = 0
+        if progress is not None:
+            progress(0, len(visible))
+        for row in visible:
+            package = self.packages.get(row["package_hash"])
+            document = load_package(package)
+            with self.transaction():
+                index_package(self.db, self._record(row), package, document=document)
+                self.db.execute("UPDATE vector_state SET outbox_offset=-1")
+            rebuilt += 1
+            if progress is not None:
+                progress(rebuilt, len(visible))
+        return {"rebuilt_documents": rebuilt, **self.index_status(principal)}
+
+    def require_exclusive_vector_scope(self, principal: Principal) -> None:
+        """Prevent a store-wide vector build from reading another principal's data."""
+        rows = self.db.execute(
+            "SELECT tenant_id,uri FROM documents WHERE available=1"
+        ).fetchall()
+        if any(
+            row["tenant_id"] != principal.tenant_id
+            or not self._can_access(principal, row["uri"])
+            for row in rows
+        ):
+            raise PermissionError(
+                "vector indexing needs a store containing only documents "
+                "accessible to the selected tenant and user"
+            )
+
+    @staticmethod
+    def _can_access(principal: Principal, uri: str) -> bool:
+        try:
+            authorize_uri(principal, parse_uri(uri))
+        except AccessDenied:
+            return False
+        return True
 
     def _queue_collection(
         self, principal: Principal, uri: str, revision_id: str, event: int, now: str
@@ -244,6 +410,7 @@ class LocalContextStore:
         canonical = address.value
         source_json = json.dumps(source or {}, sort_keys=True, ensure_ascii=False)
         digest, size = self.packages.put(package)
+        indexed = load_package(package)
         now = _now()
         with self.transaction():
             current = self.db.execute(
@@ -292,6 +459,22 @@ class LocalContextStore:
                   package_size=excluded.package_size, source_json=excluded.source_json,
                   updated_at=excluded.updated_at, available=1""",
                 values,
+            )
+            index_package(
+                self.db,
+                DocumentRecord(
+                    canonical,
+                    principal.tenant_id,
+                    document_id,
+                    revision_id,
+                    PackageRef(digest, size),
+                    address.parent,
+                    source or {},
+                    created_at,
+                    now,
+                ),
+                package,
+                document=indexed,
             )
             cursor = self.db.execute(
                 "INSERT INTO outbox (tenant_id,uri,document_id,revision_id,operation,occurred_at) "
@@ -353,6 +536,7 @@ class LocalContextStore:
                 "DELETE FROM documents WHERE tenant_id=? AND uri=?",
                 (principal.tenant_id, address.value),
             )
+            remove_index_records(self.db, principal.tenant_id, address.value)
             cursor = self.db.execute(
                 "INSERT INTO outbox (tenant_id,uri,document_id,revision_id,operation,occurred_at) "
                 "VALUES (?,?,?,?,?,?)",

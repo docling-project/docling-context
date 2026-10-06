@@ -282,13 +282,15 @@ def test_worker_retry_and_terminal_failure(tmp_path, monkeypatch):
         assert worker.status(PRINCIPAL, COLLECTION).stale
 
 
-def test_existing_step1_database_upgrades_without_losing_documents(tmp_path):
+def test_existing_database_upgrades_without_losing_documents(tmp_path):
     with LocalContextStore(tmp_path) as store:
         original = store.put(PRINCIPAL, URI, dclx())
         store.db.executescript(
-            "DROP TABLE jobs; DROP TABLE collection_status; PRAGMA user_version=1;"
+            "DROP TABLE jobs; DROP TABLE collection_status; "
+            "DROP TABLE retrieval_fts; DROP TABLE retrieval_units; "
+            "DROP TABLE vector_state; PRAGMA user_version=1;"
         )
     with LocalContextStore(tmp_path) as store:
         assert store.get_record(PRINCIPAL, URI).revision_id == original.revision_id
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 6
         assert len(CollectionWorker(store).jobs(PRINCIPAL, COLLECTION)) == 1
