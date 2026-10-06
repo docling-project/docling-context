@@ -116,7 +116,8 @@ def test_cli_from_filter_and_filename_collisions(tmp_path, capsys):
     }
     assert main(base + ["--from", "unknown"]) == 1
     assert "unknown source format" in capsys.readouterr().err
-    assert main(base + ["--from", "xml_jats"]) == 1
+    (folder / "other.pdf").unlink()
+    assert main(base + ["--from", "pdf"]) == 1
     assert "no documents matching" in capsys.readouterr().err
 
 
