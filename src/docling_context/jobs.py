@@ -84,6 +84,15 @@ class CollectionWorker:
         ).fetchall()
         return [Job(*(row[key] for key in Job.__dataclass_fields__)) for row in rows]
 
+    def get_job(self, principal: Principal, job_id: str) -> Job:
+        row = self.store.db.execute(
+            "SELECT * FROM jobs WHERE tenant_id=? AND job_id=?",
+            (principal.tenant_id, job_id),
+        ).fetchone()
+        if row is None:
+            raise KeyError(job_id)
+        return Job(*(row[key] for key in Job.__dataclass_fields__))
+
     def claim(self, now: datetime | None = None) -> Job | None:
         current = _time(now)
         stamp = current.isoformat()

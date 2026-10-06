@@ -1,6 +1,7 @@
 """Local-first context storage backed by DocLang packages."""
 
 from .contracts import ContextStore
+from .conversion_config import PdfConversionConfig
 from .converters import (
     ConversionResult,
     Converter,
@@ -47,6 +48,7 @@ __all__ = [
     "PackageError",
     "PackageMissing",
     "PackageRef",
+    "PdfConversionConfig",
     "Principal",
     "RecordMissing",
     "RevisionConflict",

@@ -17,7 +17,7 @@ from .contracts import ContextStore
 from .converters import ConversionResult, Converter, LocalDoclingConverter
 from .local import RecordMissing
 from .models import DocumentRecord, Principal
-from .package import MAX_PACKAGE_BYTES, PackageError, load_package
+from .package import MAX_PACKAGE_BYTES, PackageError, bounded_nodes, load_package
 from .uri import authorize_uri, parse_uri
 
 
@@ -26,7 +26,7 @@ class SummaryProvider(Protocol):
 
 
 def _fallback_summary(document: DocLangXDocument) -> str:
-    nodes = document.iter_nodes(limit=10_000, max_text_chars=1_024)
+    nodes = bounded_nodes(document, limit=10_000, text_bytes=1_024)
     snippets = [
         str(node["text"]).strip()
         for node in nodes
@@ -39,7 +39,7 @@ def _fallback_summary(document: DocLangXDocument) -> str:
 def _toc(document: DocLangXDocument) -> str:
     headings = [
         node
-        for node in document.iter_nodes(limit=10_000, max_text_chars=512)
+        for node in bounded_nodes(document, limit=10_000, text_bytes=512)
         if node["name"] == "heading"
     ][:256]
     root = ET.Element("doclang")
@@ -137,16 +137,17 @@ class Ingestor:
         if not native and converter is None:
             converter = LocalDoclingConverter()
         converter_id = "doclang-native" if native else type(converter).__name__
-        options: dict[str, object] = (
-            {}
-            if native
-            else {
-                "max_pages": getattr(converter, "max_pages", None),
-                "max_file_bytes": getattr(converter, "max_file_bytes", None),
-                "endpoint": getattr(converter, "endpoint", None),
-                "max_response_bytes": getattr(converter, "max_response_bytes", None),
-            }
-        )
+        options: dict[str, object] = {}
+        if not native:
+            settings = getattr(converter, "fingerprint_options", None)
+            options = (
+                settings()
+                if callable(settings)
+                else {
+                    "max_pages": getattr(converter, "max_pages", None),
+                    "max_file_bytes": getattr(converter, "max_file_bytes", None),
+                }
+            )
         if isinstance(converter, LocalDoclingConverter):
             try:
                 options["version"] = version("docling")

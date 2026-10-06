@@ -18,6 +18,7 @@ from docling_context import (
     LocalContextStore,
     MemoryContextStore,
     NodeAddress,
+    PdfConversionConfig,
     Principal,
     RecordMissing,
 )
@@ -205,14 +206,17 @@ def test_remote_adapter_uses_zip_target_and_bounded_package(monkeypatch):
             assert timeout == 120
             assert b'name="target_type"\r\n\r\nzip' in request.data
             assert b'name="to_formats"\r\n\r\ndclx' in request.data
+            assert b'name="do_ocr"\r\n\r\nfalse' in request.data
+            assert b'name="do_chart_extraction"\r\n\r\ntrue' in request.data
             return Response()
 
     monkeypatch.setattr(
         "docling_context.converters.build_opener", lambda *_args: Opener()
     )
-    result = DoclingServeConverter("https://convert.example.test").convert(
-        b"%PDF", "one.pdf"
-    )
+    result = DoclingServeConverter(
+        "https://convert.example.test",
+        config=PdfConversionConfig(do_ocr=False, do_chart_extraction=True),
+    ).convert(b"%PDF", "one.pdf")
     assert DocLangXDocument().read_bytes(result.package)
 
 

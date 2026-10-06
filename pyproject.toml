@@ -22,7 +22,10 @@ classifiers = [
 dependencies = ["doclang"]
 
 [project.optional-dependencies]
-conversion = ["docling>=2.133,<3"]
+conversion = ["docling[rapidocr]>=2.134.0,<3"]
+
+[project.scripts]
+dc = "docling_context.cli:main"
 
 [project.urls]
 Repository = "https://github.com/docling-project/docling-context"
@@ -45,6 +48,8 @@ default-groups = ["dev"]
 include = [
     "/src/docling_context",
     "/tests",
+    "/examples",
+    "/docs",
     "/README.md",
     "/LICENSE",
     "/pyproject.toml",

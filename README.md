@@ -2,14 +2,18 @@
 
 A local context tree that stores documents as immutable DocLang `.dclx` packages.
 
+See the [capability guide](docs/index.md), [CLI reference](docs/cli.md), and
+[single PDF and folder examples](examples/adding_resources/README.md).
+
 Ingest native `.dclg`, `.dclg.xml`, and `.dclx` sources with `Ingestor.add_resource`.
 Pass bytes with a filename, or a local `Path` under an explicit `allowed_roots` entry.
 Each revision stores its full document, a short DocLang summary, and a DocLang TOC
 in one DCLX package. Collection summaries are rebuilt by `CollectionWorker`;
 `CollectionWorker.status` reports whether a summary is stale.
 
-PDF conversion is local and optional: install the `conversion` extra to enable
-`LocalDoclingConverter`. `DoclingServeConverter` requires an explicit HTTPS
+Document conversion is local and optional: install the `conversion` extra to
+enable `LocalDoclingConverter` for Docling's supported formats, including PDF,
+Office documents, and images. `DoclingServeConverter` requires an explicit HTTPS
 endpoint or loopback HTTP endpoint.
 SQLite tracks logical URIs, revisions, tenant ownership, and an append-only change
 outbox. Package bytes live under SHA-256 paths. The API is designed so another
@@ -27,6 +31,20 @@ published `doclang` package, which may not yet have the required native API.
 uv sync
 uv run pytest -q tests
 ```
+
+## CLI quick start
+
+```bash
+uv sync --extra conversion
+uv run dc --store ./context-data add-resource ./paper.pdf --collection papers --no-ocr
+uv run dc --store ./context-data add-resource ./documents -r --from docx --from image
+uv run dc --store ./context-data worker --once
+uv run dc --store ./context-data tree docling://resources/papers -L 2
+```
+
+Use `uv run dc` or activate the project environment before running `dc` by
+itself; some systems also provide a calculator named `dc`. See the
+[full CLI guide](docs/cli.md) and [resource examples](examples/adding_resources/README.md).
 
 ## Local usage
 
