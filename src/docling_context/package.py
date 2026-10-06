@@ -16,6 +16,7 @@ MAX_PACKAGE_BYTES = 256 * 1024 * 1024
 MAX_NODE_TEXT_CHARS = 65_536
 MAX_XPATH_CHARS = 2_048
 MAX_XML_DEPTH = 256
+MAX_NATIVE_TEXT_BYTES = 1_048_576
 
 
 class PackageError(ValueError):
@@ -36,17 +37,30 @@ def _limits() -> ArchiveLimits:
     return limits
 
 
-def _safe_nodes(
-    document: DocLangXDocument, xpath: str | None, limit: int, text_bytes: int
+def bounded_nodes(
+    document: DocLangXDocument,
+    *,
+    xpath: str | None = None,
+    limit: int = 1_000,
+    text_bytes: int = MAX_NODE_TEXT_CHARS,
 ) -> list[DoclangNodeRecord]:
-    for extra in range(4):
+    if not 1 <= text_bytes <= MAX_NATIVE_TEXT_BYTES:
+        raise ValueError("text_bytes is out of bounds")
+    bounds = [text_bytes]
+    while bounds[-1] < MAX_NATIVE_TEXT_BYTES:
+        bounds.append(min(max(bounds[-1] * 2, 512), MAX_NATIVE_TEXT_BYTES))
+    for bound in bounds:
         try:
-            return document.iter_nodes(
-                xpath, limit=limit, max_text_chars=text_bytes + extra
-            )
+            nodes = document.iter_nodes(xpath, limit=limit, max_text_chars=bound)
         except UnicodeDecodeError:
             continue
-    raise PackageError("cannot decode bounded node text")
+        for node in nodes:
+            encoded = node["text"].encode("utf-8")
+            if len(encoded) > text_bytes:
+                node["text"] = encoded[:text_bytes].decode("utf-8", errors="ignore")
+                node["truncated"] = True
+        return nodes
+    raise PackageError("cannot decode bounded node text at the native limit")
 
 
 def load_package(data: bytes) -> DocLangXDocument:
@@ -58,7 +72,7 @@ def load_package(data: bytes) -> DocLangXDocument:
     report = document.validate_package()
     if not report["ok"]:
         raise PackageError(f"invalid DCLX package: {report['errors']}")
-    nodes = _safe_nodes(document, None, 100_000, 1)
+    nodes = bounded_nodes(document, limit=100_000, text_bytes=1)
     if len(nodes) >= 100_000:
         raise PackageError("XML node limit exceeded")
     for node in nodes:
@@ -77,7 +91,7 @@ def read_node(
         raise ValueError("invalid or oversized XPath")
     document = load_package(data)
     try:
-        nodes = _safe_nodes(document, xpath, 1, max_chars * 4)
+        nodes = bounded_nodes(document, xpath=xpath, limit=1, text_bytes=max_chars * 4)
     except PackageError:
         raise
     except ValueError as exc:

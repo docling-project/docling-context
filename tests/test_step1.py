@@ -11,6 +11,7 @@ from doclang import DoclangDocument, DocLangXDocument
 
 from docling_context import (
     AccessDenied,
+    Ingestor,
     InvalidURI,
     LocalContextStore,
     MemoryContextStore,
@@ -21,6 +22,7 @@ from docling_context import (
     RevisionConflict,
     parse_uri,
 )
+from docling_context.package import bounded_nodes
 
 ALICE = Principal("tenant-a", "alice")
 BOB = Principal("tenant-a", "bob")
@@ -220,3 +222,23 @@ def test_unicode_node_read_respects_character_limit(tmp_path):
         content = store.read_node(ALICE, address, max_chars=1)
         assert content.text == "é"
         assert content.truncated
+
+
+def test_multibyte_nodes_survive_native_byte_boundaries(tmp_path):
+    xml = (
+        "<doclang><text>éaaaa</text><text>aéaaa</text>"
+        "<text>aaéaa</text><text>aaaéa</text></doclang>"
+    )
+    document = DocLangXDocument()
+    assert document.read_xml(xml)
+    for text_bytes in (1, 2, 3, 4):
+        with pytest.raises(UnicodeDecodeError):
+            document.iter_nodes(limit=100_000, max_text_chars=text_bytes)
+    nodes = bounded_nodes(document, limit=100_000, text_bytes=1)
+    assert len(nodes) == 5
+    assert all(node["truncated"] for node in nodes[1:])
+    with LocalContextStore(tmp_path) as store:
+        record = Ingestor(store).add_resource(
+            ALICE, URI, xml.encode(), filename="multibyte.dclg"
+        )
+        assert store.get_document(ALICE, record.uri).summary() is not None

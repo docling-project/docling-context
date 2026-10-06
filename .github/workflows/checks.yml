@@ -22,7 +22,7 @@ jobs:
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libxml2-dev ninja-build
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}
           enable-cache: true
@@ -52,7 +52,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install uv and Python
-        uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.12"
           enable-cache: true
