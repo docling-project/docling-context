@@ -14,6 +14,7 @@ from doclang import DocLangXDocument
 
 from .models import DocumentRecord, Principal
 from .package import MAX_NODE_TEXT_CHARS, bounded_nodes, load_package
+from .profiles import MEMORY_PART, profile_kind
 from .uri import authorize_uri, parse_uri
 
 if TYPE_CHECKING:
@@ -58,6 +59,10 @@ def index_package(
     """Replace one document's projection inside the caller's transaction."""
     document = document or load_package(package)
     remove_index_records(db, record.tenant_id, record.uri)
+    if profile_kind(record.uri) == "memories":
+        metadata = json.loads(document.get_part_text(MEMORY_PART) or "{}")
+        if metadata.get("status") != "accepted":
+            return
     units: list[
         tuple[str, str | None, str | None, int, int | None, str | None, str, str | None]
     ] = []
