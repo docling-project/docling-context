@@ -292,5 +292,5 @@ def test_existing_database_upgrades_without_losing_documents(tmp_path):
         )
     with LocalContextStore(tmp_path) as store:
         assert store.get_record(PRINCIPAL, URI).revision_id == original.revision_id
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 6
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 7
         assert len(CollectionWorker(store).jobs(PRINCIPAL, COLLECTION)) == 1

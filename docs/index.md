@@ -14,6 +14,8 @@ them through local Python and `dc` command-line APIs.
 | Remote conversion | Opt-in Docling Serve adapter; explicit endpoint and bounded response |
 | Inspection | `dc status`, `ls`, `tree`, and task status |
 | Search | `dc search` provides scoped lexical, vector, and hybrid retrieval, including picture assets with an image-capable model |
+| Sessions | `dc session` records, lists, replays, closes, and purges revisioned event packages |
+| Durable memory | `dc memory` lists and reviews DCLX claims, runs compilation jobs, and supports scoped recall |
 
 `find` and `grep` retain their bounded substring scans. Indexed retrieval
 verifies citations against the current DCLX revision before returning text.
@@ -23,4 +25,6 @@ verifies citations against the current DCLX revision before returning text.
 - [Retrieval benchmark](../examples/retrieval/benchmark_corpus.py)
 - [CLI commands](cli.md)
 - [Storage and jobs](storage.md)
+- [Agent sessions](sessions.md)
+- [Durable memory](memory.md)
 - [Single PDF and folder examples](../examples/adding_resources/README.md)

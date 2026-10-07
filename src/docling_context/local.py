@@ -26,6 +26,7 @@ from .package import (
     load_package,
     read_node,
 )
+from .profiles import validate_profile
 from .retrieval import index_package, remove_index_records
 from .uri import AccessDenied, authorize_uri, parse_uri
 
@@ -71,7 +72,7 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 6:
+        if version > 7:
             raise RuntimeError("database schema is newer than this library")
         if version == 0:
             self.db.executescript(
@@ -233,6 +234,53 @@ class LocalContextStore:
                     "ALTER TABLE retrieval_units ADD COLUMN section_xpath TEXT"
                 )
             self.db.execute("PRAGMA user_version = 6")
+        if version < 7:
+            self.db.executescript(
+                """BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS memory_index (
+                  tenant_id TEXT NOT NULL, user_id TEXT NOT NULL, uri TEXT NOT NULL,
+                  memory_id TEXT NOT NULL, kind TEXT NOT NULL, subject TEXT,
+                  claim TEXT NOT NULL, claim_key TEXT NOT NULL,
+                  status TEXT NOT NULL, confidence REAL NOT NULL,
+                  revision_id TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  PRIMARY KEY (tenant_id, uri)
+                );
+                CREATE INDEX IF NOT EXISTS memory_owner_status ON memory_index
+                  (tenant_id, user_id, status, updated_at);
+                CREATE INDEX IF NOT EXISTS memory_claim_key ON memory_index
+                  (tenant_id, user_id, kind, claim_key);
+                CREATE TABLE IF NOT EXISTS memory_edges (
+                  tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                  memory_uri TEXT NOT NULL, source_uri TEXT NOT NULL,
+                  source_document_id TEXT NOT NULL,
+                  source_revision_id TEXT NOT NULL, source_xpath TEXT NOT NULL,
+                  PRIMARY KEY (tenant_id, memory_uri, source_uri,
+                               source_revision_id, source_xpath)
+                );
+                CREATE INDEX IF NOT EXISTS memory_source_edges ON memory_edges
+                  (tenant_id, source_uri, source_revision_id);
+                CREATE TABLE IF NOT EXISTS recall_ledger (
+                  tenant_id TEXT NOT NULL, user_id TEXT NOT NULL,
+                  session_uri TEXT NOT NULL, memory_id TEXT NOT NULL,
+                  revision_id TEXT NOT NULL, delivered_at TEXT NOT NULL,
+                  PRIMARY KEY (tenant_id, user_id, session_uri, memory_id, revision_id)
+                );
+                CREATE TABLE IF NOT EXISTS memory_compile_jobs (
+                  job_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+                  user_id TEXT NOT NULL, session_uri TEXT NOT NULL,
+                  session_document_id TEXT NOT NULL,
+                  session_revision_id TEXT NOT NULL,
+                  status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                  retry_at TEXT NOT NULL, lease_until TEXT, last_error TEXT,
+                  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                  UNIQUE (tenant_id, session_uri, session_revision_id)
+                );
+                CREATE INDEX IF NOT EXISTS memory_compile_due ON memory_compile_jobs
+                  (status, retry_at, lease_until);
+                PRAGMA user_version = 7;
+                COMMIT;
+                """
+            )
         self._backfill_retrieval()
 
     def _backfill_retrieval(self) -> None:
@@ -411,6 +459,7 @@ class LocalContextStore:
         source_json = json.dumps(source or {}, sort_keys=True, ensure_ascii=False)
         digest, size = self.packages.put(package)
         indexed = load_package(package)
+        validate_profile(canonical, indexed)
         now = _now()
         with self.transaction():
             current = self.db.execute(
@@ -524,6 +573,11 @@ class LocalContextStore:
     def delete(self, principal: Principal, uri: str, *, expected_revision: str) -> None:
         address = parse_uri(uri)
         authorize_uri(principal, address)
+        dependents = self.db.execute(
+            """SELECT DISTINCT user_id FROM memory_edges
+               WHERE tenant_id=? AND source_uri=?""",
+            (principal.tenant_id, address.value),
+        ).fetchall()
         with self.transaction():
             current = self.db.execute(
                 "SELECT * FROM documents WHERE tenant_id=? AND uri=?",
@@ -557,6 +611,14 @@ class LocalContextStore:
                 cursor.lastrowid,
                 _now(),
             )
+        if dependents:
+            from .durable_memory import MemoryService
+
+            memories = MemoryService(self)
+            for dependent in dependents:
+                memories.reconcile_sources(
+                    Principal(principal.tenant_id, dependent["user_id"])
+                )
 
     def _tree(
         self, principal: Principal, uri: str, depth: int, limit: int

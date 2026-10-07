@@ -1,5 +1,6 @@
 """Local-first context storage backed by DocLang packages."""
 
+from .compiler import MemoryCompiler, MemoryJob, redact_secrets
 from .contracts import ContextStore
 from .conversion_config import PdfConversionConfig
 from .converters import (
@@ -8,6 +9,7 @@ from .converters import (
     DoclingServeConverter,
     LocalDoclingConverter,
 )
+from .durable_memory import MemoryRecord, MemoryService, SourceCitation
 from .embeddings import (
     CLIP_MODEL,
     DEFAULT_MODEL,
@@ -35,6 +37,7 @@ from .models import (
 )
 from .package import FilePackageStore, PackageError, PackageMissing
 from .retrieval import ContextResult, RetrievalHit, Retriever, SearchScope
+from .sessions import SessionEvent, SessionInfo, SessionStore
 from .uri import AccessDenied, ContextURI, InvalidURI, authorize_uri, parse_uri
 from .vectors import EmbeddingProvider, TurbovecIndex, VectorIndex
 
@@ -60,7 +63,11 @@ __all__ = [
     "Job",
     "LocalContextStore",
     "LocalDoclingConverter",
+    "MemoryCompiler",
     "MemoryContextStore",
+    "MemoryJob",
+    "MemoryRecord",
+    "MemoryService",
     "MlxEmbeddingProvider",
     "NodeAddress",
     "NodeContent",
@@ -74,6 +81,10 @@ __all__ = [
     "Retriever",
     "RevisionConflict",
     "SearchScope",
+    "SessionEvent",
+    "SessionInfo",
+    "SessionStore",
+    "SourceCitation",
     "SummaryProvider",
     "TenantScope",
     "TreeEntry",
@@ -85,5 +96,6 @@ __all__ = [
     "embed_text_image",
     "local_embedding_provider",
     "parse_uri",
+    "redact_secrets",
     "stored_embedding_provider",
 ]

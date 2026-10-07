@@ -16,6 +16,7 @@ from .models import (
     TreeEntry,
 )
 from .package import load_package, read_node
+from .profiles import validate_profile
 from .uri import AccessDenied, authorize_uri, parse_uri
 
 
@@ -38,7 +39,7 @@ class MemoryContextStore:
     ) -> DocumentRecord:
         address = parse_uri(uri)
         authorize_uri(principal, address)
-        load_package(package)
+        validate_profile(address.value, load_package(package))
         key = principal.tenant_id, address.value
         current = self.records.get(key)
         if (current is None and expected_revision is not None) or (

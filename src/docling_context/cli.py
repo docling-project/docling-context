@@ -11,13 +11,16 @@ import sys
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import asdict, replace
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 
 from tabulate import tabulate  # type: ignore[import-untyped]
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from .compiler import MemoryCompiler
 from .conversion_config import PdfConversionConfig
 from .converters import LocalDoclingConverter
+from .durable_memory import MemoryRecord, MemoryService, SourceCitation
 from .embeddings import (
     CLIP_MODEL,
     DEFAULT_MODEL,
@@ -29,7 +32,15 @@ from .jobs import CollectionWorker
 from .local import LocalContextStore
 from .models import Principal
 from .package import bounded_nodes
+from .profiles import (
+    MAX_ATTACHMENT_BYTES,
+    MEMORY_KINDS,
+    MEMORY_STATUSES,
+    profile_kind,
+    validate_memory,
+)
 from .retrieval import RetrievalHit, Retriever, SearchScope
+from .sessions import SessionInfo, SessionStore
 from .uri import authorize_uri, parse_uri
 from .vectors import TurbovecIndex
 
@@ -66,6 +77,77 @@ def _status(
             disable_numparse=True,
         )
     )
+
+
+def _table_or_json(
+    values: list[dict[str, object]], *, headers: tuple[str, ...], json_output: bool
+) -> None:
+    if json_output:
+        _json(values)
+    elif values:
+        print(
+            tabulate(
+                [[row.get(key, "") for key in headers] for row in values],
+                headers=tuple(key.replace("_", " ").title() for key in headers),
+                tablefmt="rounded_grid",
+                disable_numparse=True,
+                maxcolwidths=tuple(
+                    72 if key in {"claim", "text"} else None for key in headers
+                ),
+            )
+        )
+    else:
+        print("No records.")
+
+
+def _session_rows(items: tuple[SessionInfo, ...]) -> list[dict[str, object]]:
+    return [asdict(item) for item in items]
+
+
+def _memory_rows(items: tuple[MemoryRecord, ...]) -> list[dict[str, object]]:
+    return [asdict(item) for item in items]
+
+
+def _session_id(value: str | None) -> str:
+    session_id = value or os.environ.get("DOCLING_CONTEXT_SESSION")
+    if not session_id:
+        raise ValueError("session ID required; pass it or set DOCLING_CONTEXT_SESSION")
+    return session_id
+
+
+def _timestamp_filter(value: str | None, *, upper: bool = False) -> str | None:
+    if value is None:
+        return None
+    try:
+        if len(value) == 10:
+            moment = datetime.combine(
+                date.fromisoformat(value),
+                time.max if upper else time.min,
+                tzinfo=UTC,
+            )
+        else:
+            moment = datetime.fromisoformat(value)
+            if moment.tzinfo is None:
+                moment = moment.replace(tzinfo=UTC)
+    except ValueError as exc:
+        raise ValueError("date filter needs an ISO date or timestamp") from exc
+    return moment.astimezone(UTC).isoformat()
+
+
+def _input_text(args: argparse.Namespace, *, name: str = "text") -> str:
+    value = getattr(args, name, None)
+    option = getattr(args, "text_option", None)
+    if option is not None:
+        if value is not None:
+            raise ValueError("use either positional text or --text")
+        value = option
+    if args.stdin:
+        if value is not None:
+            raise ValueError("use either text argument or --stdin")
+        value = sys.stdin.read(20_001)
+    if value is None:
+        raise ValueError("text argument or --stdin is required")
+    return value
 
 
 def _advance_progress(bar: tqdm, completed: int, total: int) -> None:
@@ -301,6 +383,11 @@ def _scan(
             break
         record = store.get_record(principal, row["uri"])
         document = store.get_document(principal, record.uri)
+        if (
+            profile_kind(record.uri) == "memories"
+            and validate_memory(document)["status"] != "accepted"
+        ):
+            continue
         nodes = bounded_nodes(
             document, limit=min(2_000, remaining_nodes), text_bytes=2_048
         )
@@ -550,7 +637,394 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Print complete JSON records instead of the compact table (default: table).",
     )
+
+    session = commands.add_parser("session", help="Record and inspect agent sessions")
+    session_commands = session.add_subparsers(dest="session_command", required=True)
+    session_start = session_commands.add_parser("start", help="Create an open session")
+    session_start.add_argument("--id", help="Session ID (default: generated UUID)")
+    session_list = session_commands.add_parser("list", help="List your sessions")
+    session_list.add_argument(
+        "--status",
+        choices=("open", "closed"),
+        help="Filter lifecycle state (default: all)",
+    )
+    for command in (session_list,):
+        command.add_argument(
+            "--since", help="Updated on or after this ISO date or timestamp"
+        )
+        command.add_argument(
+            "--until", help="Updated on or before this ISO date or timestamp"
+        )
+        command.add_argument(
+            "--limit", type=int, default=100, help="Page size, 1–1000 (default: 100)"
+        )
+        command.add_argument(
+            "--offset", type=int, default=0, help="Skip this many matches (default: 0)"
+        )
+    for name in ("show", "replay", "close", "delete", "purge", "jobs"):
+        action = "List compilation jobs for" if name == "jobs" else f"{name.title()}"
+        command = session_commands.add_parser(name, help=f"{action} one session")
+        command.add_argument("session_id", help="Session ID or full URI")
+        command.add_argument(
+            "--json", action="store_true", help="Print JSON instead of a table"
+        )
+    session_append = session_commands.add_parser(
+        "append", help="Append one session event"
+    )
+    session_append.add_argument(
+        "session_id", nargs="?", help="ID or DOCLING_CONTEXT_SESSION"
+    )
+    session_append.add_argument("text", nargs="?", help="Event text, or use --stdin")
+    session_append.add_argument(
+        "--text",
+        dest="text_option",
+        help="Event text, useful with DOCLING_CONTEXT_SESSION",
+    )
+    session_append.add_argument(
+        "--stdin", action="store_true", help="Read event text from stdin"
+    )
+    session_append.add_argument(
+        "--kind",
+        required=True,
+        choices=("turn", "tool_call", "tool_result", "feedback"),
+    )
+    session_append.add_argument("--key", required=True, help="Stable idempotency key")
+    session_append.add_argument(
+        "--turn-id", default="", help="Group related events by turn (default: empty)"
+    )
+    session_append.add_argument(
+        "--attachment", type=Path, help="Optional bounded binary attachment"
+    )
+    session_append.add_argument(
+        "--content-type",
+        default="application/octet-stream",
+        help="Attachment MIME type (default: application/octet-stream)",
+    )
+    session_trim = session_commands.add_parser(
+        "trim", help="Retain recent session events"
+    )
+    session_trim.add_argument("session_id")
+    session_trim.add_argument("--keep-last", type=int, required=True)
+    session_attachment = session_commands.add_parser(
+        "attachment", help="Save one event attachment"
+    )
+    session_attachment.add_argument("session_id")
+    session_attachment.add_argument("key", help="Idempotency key of the attached event")
+    session_attachment.add_argument("--output", type=Path, required=True)
+    session_attachment.add_argument("--json", action="store_true")
+    for command in (session_start, session_list, session_append, session_trim):
+        command.add_argument("--json", action="store_true")
+
+    memory = commands.add_parser("memory", help="Review and recall durable memories")
+    memory_commands = memory.add_subparsers(dest="memory_command", required=True)
+    memory_list = memory_commands.add_parser(
+        "list", help="List your non-purged memories"
+    )
+    memory_list.add_argument(
+        "--status",
+        choices=sorted(MEMORY_STATUSES),
+        help="Filter review state (default: all)",
+    )
+    memory_list.add_argument(
+        "--kind", choices=sorted(MEMORY_KINDS), help="Filter memory kind (default: all)"
+    )
+    memory_list.add_argument(
+        "--since", help="Updated on or after this ISO date or timestamp"
+    )
+    memory_list.add_argument(
+        "--until", help="Updated on or before this ISO date or timestamp"
+    )
+    memory_list.add_argument(
+        "--limit", type=int, default=100, help="Page size, 1–1000 (default: 100)"
+    )
+    memory_list.add_argument(
+        "--offset", type=int, default=0, help="Skip this many matches (default: 0)"
+    )
+    memory_proposals = memory_commands.add_parser(
+        "proposals", help="List claims awaiting review"
+    )
+    memory_proposals.add_argument("--kind", choices=sorted(MEMORY_KINDS))
+    memory_proposals.add_argument(
+        "--limit", type=int, default=100, help="Page size, 1–1000 (default: 100)"
+    )
+    memory_proposals.add_argument(
+        "--offset", type=int, default=0, help="Skip this many matches (default: 0)"
+    )
+    for command in (memory_list, memory_proposals):
+        command.add_argument(
+            "--json", action="store_true", help="Print JSON instead of a table"
+        )
+    for name in ("show", "accept", "reject", "delete", "purge"):
+        command = memory_commands.add_parser(name, help=f"{name.title()} one memory")
+        command.add_argument("uri")
+        command.add_argument("--json", action="store_true")
+        if name in {"reject", "delete"}:
+            command.add_argument("--reason", default="")
+    memory_correct = memory_commands.add_parser(
+        "correct", help="Write an accepted correction"
+    )
+    memory_correct.add_argument("uri")
+    memory_correct.add_argument("claim", nargs="?")
+    memory_correct.add_argument("--stdin", action="store_true")
+    memory_correct.add_argument("--explanation")
+    memory_correct.add_argument("--json", action="store_true")
+    memory_create = memory_commands.add_parser(
+        "create", help="Create a user-authored claim"
+    )
+    memory_create.add_argument("kind", choices=sorted(MEMORY_KINDS))
+    memory_create.add_argument("claim", nargs="?")
+    memory_create.add_argument("--stdin", action="store_true")
+    memory_create.add_argument("--explanation", default="")
+    memory_create.add_argument("--subject")
+    memory_create.add_argument("--confidence", type=float, default=1.0)
+    memory_create.add_argument(
+        "--accepted",
+        action="store_true",
+        help="Accept this user-authored claim immediately",
+    )
+    for field in ("uri", "document_id", "revision_id", "xpath"):
+        memory_create.add_argument(f"--source-{field.replace('_', '-')}")
+    memory_create.add_argument("--json", action="store_true")
+    memory_search = memory_commands.add_parser("search", help="Search accepted claims")
+    memory_search.add_argument("query", nargs="?", default="")
+    memory_search.add_argument("--limit", type=int, default=10)
+    memory_search.add_argument("--json", action="store_true")
+    memory_recall = memory_commands.add_parser(
+        "recall", help="Recall claims once per session revision"
+    )
+    memory_recall.add_argument("query", nargs="?", default="")
+    memory_recall.add_argument("--session", help="ID or DOCLING_CONTEXT_SESSION")
+    memory_recall.add_argument("--limit", type=int, default=10)
+    memory_recall.add_argument("--json", action="store_true")
+    memory_worker = memory_commands.add_parser(
+        "worker", help="Process queued memory compilation jobs"
+    )
+    memory_worker.add_argument(
+        "--once", action="store_true", help="Process one due job then exit"
+    )
+    memory_worker.add_argument("--json", action="store_true")
+    memory_jobs = memory_commands.add_parser(
+        "jobs", help="List compilation jobs for a session"
+    )
+    memory_jobs.add_argument("session_id")
+    memory_jobs.add_argument("--limit", type=int, default=100)
+    memory_jobs.add_argument("--json", action="store_true")
     return parser
+
+
+def _session_command(
+    args: argparse.Namespace, store: LocalContextStore, principal: Principal
+) -> None:
+    sessions = SessionStore(store)
+    command = args.session_command
+    if command == "start":
+        _status(asdict(sessions.start(principal, args.id)), json_output=args.json)
+    elif command == "list":
+        since = _timestamp_filter(args.since)
+        until = _timestamp_filter(args.until, upper=True)
+        if since and until and since > until:
+            raise ValueError("--since is later than --until")
+        items = sessions.list(
+            principal,
+            status=args.status,
+            since=since,
+            until=until,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        _table_or_json(
+            _session_rows(items),
+            headers=(
+                "session_id",
+                "status",
+                "event_count",
+                "updated_at",
+                "revision_id",
+            ),
+            json_output=args.json,
+        )
+    elif command == "show":
+        info = sessions.get(principal, args.session_id)
+        values = asdict(info)
+        jobs = MemoryCompiler(store).jobs(principal, args.session_id)
+        values["compilation"] = jobs[0].status if jobs else "none"
+        _status(values, json_output=args.json)
+    elif command == "append":
+        session_id = _session_id(args.session_id)
+        sessions.get(principal, session_id)
+        if args.attachment and args.attachment.stat().st_size > MAX_ATTACHMENT_BYTES:
+            raise ValueError("session attachment exceeds 4 MiB")
+        event = sessions.append(
+            principal,
+            session_id,
+            key=args.key,
+            kind=args.kind,
+            text=_input_text(args),
+            turn_id=args.turn_id,
+            attachment=args.attachment.read_bytes() if args.attachment else None,
+            content_type=args.content_type,
+        )
+        _status(asdict(event), json_output=args.json)
+    elif command == "replay":
+        events = sessions.replay(principal, args.session_id)
+        _table_or_json(
+            [asdict(event) for event in events],
+            headers=("sequence", "kind", "turn_id", "text", "xpath", "created_at"),
+            json_output=args.json,
+        )
+    elif command == "close":
+        _status(
+            asdict(sessions.close(principal, args.session_id)), json_output=args.json
+        )
+    elif command == "trim":
+        sessions.trim(principal, args.session_id, keep_last=args.keep_last)
+        _status(asdict(sessions.get(principal, args.session_id)), json_output=args.json)
+    elif command == "attachment":
+        payload = sessions.read_attachment(principal, args.session_id, args.key)
+        args.output.write_bytes(payload)
+        _status(
+            {"output": str(args.output), "size_bytes": len(payload)},
+            json_output=args.json,
+        )
+    elif command == "delete":
+        sessions.delete(principal, args.session_id)
+        _status(
+            {"session_id": args.session_id, "status": "deleted"}, json_output=args.json
+        )
+    elif command == "purge":
+        count = sessions.purge(principal, args.session_id)
+        _status(
+            {"session_id": args.session_id, "purged_revisions": count},
+            json_output=args.json,
+        )
+    elif command == "jobs":
+        jobs = MemoryCompiler(store).jobs(principal, args.session_id)
+        _table_or_json(
+            [asdict(job) for job in jobs],
+            headers=(
+                "job_id",
+                "status",
+                "attempts",
+                "last_error",
+                "session_revision_id",
+            ),
+            json_output=args.json,
+        )
+
+
+def _memory_command(
+    args: argparse.Namespace, store: LocalContextStore, principal: Principal
+) -> None:
+    memories = MemoryService(store)
+    command = args.memory_command
+    if command in {"list", "proposals"}:
+        since = _timestamp_filter(args.since) if command == "list" else None
+        until = _timestamp_filter(args.until, upper=True) if command == "list" else None
+        if since and until and since > until:
+            raise ValueError("--since is later than --until")
+        items = memories.list(
+            principal,
+            status=args.status if command == "list" else "proposed",
+            kind=args.kind,
+            since=since,
+            until=until,
+            limit=args.limit,
+            offset=args.offset,
+        )
+        _table_or_json(
+            _memory_rows(items),
+            headers=(
+                "memory_id",
+                "kind",
+                "status",
+                "claim",
+                "confidence",
+                "updated_at",
+            ),
+            json_output=args.json,
+        )
+    elif command == "show":
+        _status(asdict(memories.get(principal, args.uri)), json_output=args.json)
+    elif command == "create":
+        fields = (
+            args.source_uri,
+            args.source_document_id,
+            args.source_revision_id,
+            args.source_xpath,
+        )
+        if any(fields) and not all(fields):
+            raise ValueError("provide all four --source-* citation fields")
+        citations = (SourceCitation(*fields),) if all(fields) else ()
+        record = memories.create(
+            principal,
+            args.kind,
+            _input_text(args, name="claim"),
+            explanation=args.explanation,
+            subject=args.subject,
+            confidence=args.confidence,
+            citations=citations,
+            accepted=args.accepted,
+        )
+        _status(asdict(record), json_output=args.json)
+    elif command in {"accept", "reject", "correct", "delete", "purge"}:
+        if command == "accept":
+            record = memories.accept(principal, args.uri)
+        elif command == "reject":
+            record = memories.reject(principal, args.uri, reason=args.reason)
+        elif command == "correct":
+            record = memories.correct(
+                principal,
+                args.uri,
+                _input_text(args, name="claim"),
+                explanation=args.explanation,
+            )
+        elif command == "delete":
+            record = memories.delete(principal, args.uri, reason=args.reason)
+        else:
+            count = memories.purge(principal, args.uri)
+            _status({"uri": args.uri, "purged_revisions": count}, json_output=args.json)
+            return
+        _status(asdict(record), json_output=args.json)
+    elif command in {"search", "recall"}:
+        items = (
+            memories.search(principal, args.query, limit=args.limit)
+            if command == "search"
+            else memories.recall(
+                principal, _session_id(args.session), args.query, limit=args.limit
+            )
+        )
+        _table_or_json(
+            _memory_rows(items),
+            headers=("memory_id", "kind", "claim", "confidence", "revision_id"),
+            json_output=args.json,
+        )
+    elif command == "jobs":
+        jobs = MemoryCompiler(store).jobs(principal, args.session_id, limit=args.limit)
+        _table_or_json(
+            [asdict(job) for job in jobs],
+            headers=(
+                "job_id",
+                "status",
+                "attempts",
+                "last_error",
+                "session_revision_id",
+            ),
+            json_output=args.json,
+        )
+    elif command == "worker":
+        compiler = MemoryCompiler(store)
+        if args.once:
+            job = compiler.run_once()
+            _status(asdict(job) if job else {"job": "none"}, json_output=args.json)
+        else:
+            import time
+
+            try:
+                while True:
+                    if compiler.run_once() is None:
+                        time.sleep(1)
+            except KeyboardInterrupt:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -567,6 +1041,21 @@ def main(argv: list[str] | None = None) -> int:
                     ).fetchone()[0]
                     for table in ("documents", "revisions", "jobs")
                 }
+                user_prefix = (
+                    f"docling://users/{principal.tenant_id}/{principal.user_id}/"
+                )
+                for name in ("sessions", "memories"):
+                    prefix = user_prefix + name + "/"
+                    counts[name] = store.db.execute(
+                        """SELECT COUNT(*) FROM documents WHERE tenant_id=?
+                           AND substr(uri,1,?)=?""",
+                        (principal.tenant_id, len(prefix), prefix),
+                    ).fetchone()[0]
+                counts["memory_jobs"] = store.db.execute(
+                    """SELECT COUNT(*) FROM memory_compile_jobs
+                       WHERE tenant_id=? AND user_id=?""",
+                    (principal.tenant_id, principal.user_id),
+                ).fetchone()[0]
                 _status(
                     {"store": str(store.root.resolve()), **counts},
                     json_output=args.json,
@@ -635,6 +1124,10 @@ def main(argv: list[str] | None = None) -> int:
                         _json(store.index_status(principal))
             elif args.command == "add-resource":
                 _add_resource(args, store, principal)
+            elif args.command == "session":
+                _session_command(args, store, principal)
+            elif args.command == "memory":
+                _memory_command(args, store, principal)
             elif args.command == "task":
                 _status(
                     asdict(worker.get_job(principal, args.job_id)),
