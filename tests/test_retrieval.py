@@ -496,7 +496,7 @@ def test_existing_retrieval_index_adds_picture_column_on_upgrade(tmp_path):
             "ALTER TABLE retrieval_units DROP COLUMN asset_path; PRAGMA user_version=4;"
         )
     with LocalContextStore(tmp_path) as store:
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 7
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 8
         assert "asset_path" in {
             row["name"]
             for row in store.db.execute("PRAGMA table_info(retrieval_units)")
