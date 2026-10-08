@@ -573,6 +573,13 @@ def _parser() -> argparse.ArgumentParser:
     task_status.add_argument(
         "--json", action="store_true", help="Print JSON instead of a table."
     )
+    jobs = commands.add_parser(
+        "jobs", help="Inspect durable ingestion or collection jobs"
+    )
+    jobs_commands = jobs.add_subparsers(dest="jobs_command", required=True)
+    jobs_status = jobs_commands.add_parser("status", help="Show one job by ID")
+    jobs_status.add_argument("job_id")
+    jobs_status.add_argument("--json", action="store_true")
     worker = commands.add_parser("worker", help="Process queued collection summaries")
     worker.add_argument("--once", action="store_true")
     listing = commands.add_parser("ls", help="List direct children")
@@ -580,6 +587,17 @@ def _parser() -> argparse.ArgumentParser:
     tree = commands.add_parser("tree", help="Walk a context subtree")
     tree.add_argument("uri")
     tree.add_argument("-L", "--depth", type=int, default=2)
+    outline = commands.add_parser("outline", help="Read a document TOC sidecar")
+    outline.add_argument("uri")
+    outline.add_argument("--revision", help="Immutable document revision")
+    outline.add_argument("--json", action="store_true")
+    show = commands.add_parser("show", help="Read one cited DocLang node")
+    show.add_argument("uri")
+    show.add_argument("xpath")
+    show.add_argument("--revision", help="Immutable document revision")
+    show.add_argument("--format", choices=("text", "xml"), default="text")
+    show.add_argument("--max-chars", type=int, default=8_192)
+    show.add_argument("--json", action="store_true")
     for name in ("find", "grep"):
         search = commands.add_parser(name, help="Bounded lexical lookup")
         search.add_argument("term")
@@ -1147,11 +1165,46 @@ def main(argv: list[str] | None = None) -> int:
             elif args.command == "ls":
                 for entry in store.list_children(principal, _prefix(args.uri)):
                     _json(asdict(entry))
+            elif args.command == "jobs":
+                from .service import ContextService, JobStatusRequest
+
+                job_data = (
+                    ContextService(store, principal)
+                    .job_status(JobStatusRequest(args.job_id))
+                    .data
+                )
+                _status(job_data, json_output=args.json)
             elif args.command == "tree":
                 for entry in store.walk(
                     principal, _prefix(args.uri), depth=args.depth, limit=1_000
                 ):
                     print(f"{'  ' * (entry.depth - 1)}{entry.uri}")
+            elif args.command in {"outline", "show"}:
+                from .service import ContextService, OutlineRequest, ShowRequest
+
+                service = ContextService(store, principal)
+                if args.command == "outline":
+                    value = service.outline(
+                        OutlineRequest(args.uri, args.revision)
+                    ).data
+                    if args.json:
+                        _json(value)
+                    else:
+                        print(value["toc_xml"])
+                else:
+                    value = service.show(
+                        ShowRequest(
+                            args.uri,
+                            args.xpath,
+                            args.revision,
+                            args.max_chars,
+                            args.format,
+                        )
+                    ).data
+                    if args.json:
+                        _json(value)
+                    else:
+                        print(value["content"])
             elif args.command in {"find", "grep"}:
                 hits = _scan(store, principal, args.term, _prefix(args.uri))
                 if args.command == "find":

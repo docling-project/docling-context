@@ -11,6 +11,7 @@ uses the name `dc` on some machines.
 uv run --extra conversion dc --store ./context-data add-resource ./paper.pdf \
   --collection papers --no-ocr --tables --no-charts
 uv run dc --store ./context-data task status JOB_ID
+uv run dc --store ./context-data jobs status JOB_ID --json
 uv run dc --store ./context-data worker --once
 uv run dc --store ./context-data status
 uv run dc --store ./context-data index status
@@ -21,12 +22,17 @@ uv run --extra vectors dc --store ./context-data index vector rebuild
 uv run --extra vectors dc --store ./context-data search "invoice" --mode hybrid
 uv run dc --store ./context-data ls docling://resources/
 uv run dc --store ./context-data tree docling://resources/papers -L 2
+uv run dc --store ./context-data outline docling://resources/papers/paper
+uv run dc --store ./context-data show docling://resources/papers/paper \
+  '/doclang[1]/text[1]' --format xml --json
 uv run dc --store ./context-data find "invoice" --uri docling://resources/papers
 uv run dc --store ./context-data grep "total" --uri docling://resources/papers
 uv run dc --store ./context-data search "invoice" --uri docling://resources/papers
 uv run dc --store ./context-data session start --id chat-1
 uv run dc --store ./context-data session list --status open
 uv run dc --store ./context-data memory list --status proposed
+uv run docling-context integrate codex --scope project --store ./context-data
+uv run docling-context doctor codex --scope project --store ./context-data
 ```
 
 `add-resource` accepts one document or a folder of documents. With the
@@ -50,6 +56,15 @@ Ingestion is synchronous. Each new resource revision queues a collection-summary
 job; `add-resource` prints the revision and its `task_id`. `task status` reports
 that job. Run `worker --once` for one due job, or `worker` continuously. A
 collection summary may remain stale until its latest job completes.
+
+`outline URI` reads the TOC sidecar and `show URI XPATH` reads one cited node.
+Use `--revision ID` for an immutable revision, `--format xml` for DocLang XML,
+and `--max-chars N` to bound output. Both commands support `--json`; JSON
+includes the URI, document ID, revision ID, XPath, and truncation marker.
+
+`docling-context` exposes the existing `dc` commands and adds `mcp`,
+`integrate`, `doctor`, `remove`, and `ingest-worker`. See the
+[agent harness guide](agents.md) for scopes, remote tokens, and verification.
 
 Every `status` command prints a table by default. Pass `--json` for structured
 output, for example `dc status --json`, `dc task status JOB_ID --json`, or

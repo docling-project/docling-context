@@ -53,7 +53,11 @@ class LocalContextStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.packages = FilePackageStore(self.root / "packages")
-        self.db = sqlite3.connect(self.root / "context.sqlite3", isolation_level=None)
+        self.db = sqlite3.connect(
+            self.root / "context.sqlite3",
+            isolation_level=None,
+            check_same_thread=False,
+        )
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
@@ -72,7 +76,7 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 7:
+        if version > 8:
             raise RuntimeError("database schema is newer than this library")
         if version == 0:
             self.db.executescript(
@@ -278,6 +282,21 @@ class LocalContextStore:
                 CREATE INDEX IF NOT EXISTS memory_compile_due ON memory_compile_jobs
                   (status, retry_at, lease_until);
                 PRAGMA user_version = 7;
+                COMMIT;
+                """
+            )
+        if version < 8:
+            self.db.executescript(
+                """BEGIN IMMEDIATE;
+                CREATE TABLE IF NOT EXISTS ingest_jobs (
+                  job_id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL,
+                  user_id TEXT NOT NULL, uri TEXT NOT NULL, filename TEXT NOT NULL,
+                  source BLOB NOT NULL, force INTEGER NOT NULL,
+                  status TEXT NOT NULL, revision_id TEXT, error TEXT,
+                  lease_until TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS ingest_jobs_due ON ingest_jobs (status, lease_until);
+                PRAGMA user_version = 8;
                 COMMIT;
                 """
             )

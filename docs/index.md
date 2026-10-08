@@ -1,7 +1,7 @@
 # Capabilities
 
 `docling-context` stores document revisions as DocLang DCLX packages and exposes
-them through local Python and `dc` command-line APIs.
+them through Python, `dc`, MCP, and authenticated HTTP APIs.
 
 | Capability | Current behavior |
 | --- | --- |
@@ -16,6 +16,8 @@ them through local Python and `dc` command-line APIs.
 | Search | `dc search` provides scoped lexical, vector, and hybrid retrieval, including picture assets with an image-capable model |
 | Sessions | `dc session` records, lists, replays, closes, and purges revisioned event packages |
 | Durable memory | `dc memory` lists and reviews DCLX claims, runs compilation jobs, and supports scoped recall |
+| Agent harnesses | One-command MCP integration for Codex, Claude Code, Hermes, and Pi |
+| Public service | Versioned Python and authenticated HTTP operations for inspection, search, ingestion, jobs, sessions, and memory |
 
 `find` and `grep` retain their bounded substring scans. Indexed retrieval
 verifies citations against the current DCLX revision before returning text.
@@ -27,4 +29,5 @@ verifies citations against the current DCLX revision before returning text.
 - [Storage and jobs](storage.md)
 - [Agent sessions](sessions.md)
 - [Durable memory](memory.md)
+- [Agent harness installation and MCP](agents.md)
 - [Single PDF and folder examples](../examples/adding_resources/README.md)

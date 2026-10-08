@@ -4,6 +4,7 @@ A local context tree that stores documents as immutable DocLang `.dclx` packages
 
 See the [capability guide](docs/index.md), [retrieval guide](docs/retrieval.md),
 [session guide](docs/sessions.md), [memory guide](docs/memory.md),
+[agent harness guide](docs/agents.md),
 [CLI reference](docs/cli.md), and
 [single PDF and folder examples](examples/adding_resources/README.md).
 
@@ -49,6 +50,8 @@ uv run --extra vectors dc --store ./context-data search "invoice" --mode hybrid
 uv run dc --store ./context-data session start --id chat-1
 uv run dc --store ./context-data session list
 uv run dc --store ./context-data memory list --status proposed
+uv run docling-context integrate codex --scope project --store ./context-data
+uv run docling-context doctor codex --scope project --store ./context-data
 ```
 
 Use `uv run dc` or activate the project environment before running `dc` by

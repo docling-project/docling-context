@@ -19,7 +19,15 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Text Processing :: Markup :: XML",
 ]
-dependencies = ["doclang", "tabulate>=0.10,<1", "tqdm>=4.66,<5"]
+dependencies = [
+    "doclang",
+    "httpx>=0.27,<1",
+    "mcp>=1.20,<2",
+    "ruamel.yaml>=0.18,<1",
+    "tabulate>=0.10,<1",
+    "tomlkit>=0.13,<1",
+    "tqdm>=4.66,<5",
+]
 
 [project.optional-dependencies]
 conversion = ["docling[rapidocr]>=2.134.0,<3"]
@@ -33,6 +41,7 @@ vectors = [
 
 [project.scripts]
 dc = "docling_context.cli:main"
+docling-context = "docling_context.app:main"
 
 [project.urls]
 Repository = "https://github.com/docling-project/docling-context"
