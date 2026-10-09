@@ -1,33 +1,83 @@
-# Capabilities
+# docling-context
 
-`docling-context` stores document revisions as DocLang DCLX packages and exposes
-them through Python, `dc`, MCP, and authenticated HTTP APIs.
+`docling-context` turns source files into citable DCLX packages. Resources are
+shared; a project represents a topic of work and links only the resources it
+needs. One library document, memory, skill, or concept can support several
+projects without being copied. SQLite records resource identity, links, jobs,
+sessions, knowledge facts, and search indexes in one local store.
 
-| Capability | Current behavior |
-| --- | --- |
-| Storage | SQLite metadata and outbox; immutable, SHA-256-addressed DCLX packages |
-| Namespaces | Tenant-scoped resources and user-scoped memories, sessions, and skills |
-| Ingestion | Native DCLG and DCLX, plus Docling formats through optional local conversion |
-| Context tiers | L0 document summary, L1 heading TOC, L2 source document in one package |
-| Collection summaries | Durable jobs with retries, leases, and visible stale status |
-| Conversion | Typed PDF and image settings for OCR, tables, charts, enrichment, images, and limits |
-| Remote conversion | Opt-in Docling Serve adapter; explicit endpoint and bounded response |
-| Inspection | `dc status`, `ls`, `tree`, and task status |
-| Search | `dc search` provides scoped lexical, vector, and hybrid retrieval, including picture assets with an image-capable model |
-| Sessions | `dc session` records, lists, replays, closes, and purges revisioned event packages |
-| Durable memory | `dc memory` lists and reviews DCLX claims, runs compilation jobs, and supports scoped recall |
-| Agent harnesses | One-command MCP integration for Codex, Claude Code, Hermes, and Pi |
-| Public service | Versioned Python and authenticated HTTP operations for inspection, search, ingestion, jobs, sessions, and memory |
+```text
+docling://
+├── resources/
+│   ├── library/{doc_id}       original sources converted to DCLX
+│   ├── memories/{memory_id}   session outcomes and conclusions
+│   ├── skills/{skill_id}      reusable methods
+│   ├── concepts/{concept_id}  entity and relationship definitions
+│   └── knowledge/{knowledge_id} structured knowledge descriptors
+├── projects/{project_id}/
+│   ├── .description.dclx      optional short description
+│   ├── .abstract.dclx         L0 relevance check
+│   ├── .overview.dclx         L1 structure and key points
+│   └── sessions/{session_id}
+└── user/{user_id}/
+```
 
-`find` and `grep` retain their bounded substring scans. Indexed retrieval
-verifies citations against the current DCLX revision before returning text.
+Each resource type is a flat list. Project membership and typed relationships
+between resources live in SQLite. `dc overview` shows every project and counts
+its linked documents, memories, skills, concepts, knowledge descriptors, and
+sessions. Project context documents do not count as linked resources.
 
+## 5 minutes to fun
+
+Install Python 3.12+ and `uv`, then run from this repository:
+
+```bash
+uv sync --extra conversion
+uv run dc init
+uv run dc project create materials --title "Materials research"
+uv run dc add-resource ./paper.pdf --project materials
+uv run dc overview
+uv run dc search "material properties" --project materials
+```
+
+`add-resource` prints the canonical library URI and revision. It checks the
+source binary hash first and reuses the existing library document on a repeat
+import. Search results include URI, revision ID, and XPath. Read a result with
+`uv run dc outline URI` and `uv run dc show URI XPATH --revision REVISION_ID`.
+Add `--json` to commands when an agent or script needs structured output.
+
+If you have no PDF, use a native DocLang source without the conversion extra:
+
+```bash
+printf '<doclang><text>Basalt is an igneous rock.</text></doclang>' > basalt.dclg
+uv run dc add-resource ./basalt.dclg --project materials
+uv run dc search basalt --project materials
+```
+
+The default store is `~/.local/share/docling-context`. `dc init` creates its
+SQLite database and package directory. Use `--store PATH` or set
+`DOCLING_CONTEXT_STORE` to select another location, and use the same setting
+for the CLI, workers, and MCP server. No PostgreSQL setup is required.
+
+## Connect an agent
+
+The bundled installer configures a local MCP server for Codex, Claude Code,
+Hermes, or Pi. For example:
+
+```bash
+uv run docling-context integrate codex --scope project
+uv run docling-context doctor codex --scope project
+```
+
+See [agent installation](agents.md) for all four recipes, supported scopes,
+write tools, and remote deployment.
+
+## Guides
+
+- [CLI and project workflows](cli.md)
+- [Storage, revisions, and jobs](storage.md)
+- [Scoped retrieval and citations](retrieval.md)
 - [Conversion settings](conversion.md)
-- [Scoped retrieval](retrieval.md)
-- [Retrieval benchmark](../examples/retrieval/benchmark_corpus.py)
-- [CLI commands](cli.md)
-- [Storage and jobs](storage.md)
 - [Agent sessions](sessions.md)
 - [Durable memory](memory.md)
-- [Agent harness installation and MCP](agents.md)
-- [Single PDF and folder examples](../examples/adding_resources/README.md)
+- [Agent installation and MCP](agents.md)

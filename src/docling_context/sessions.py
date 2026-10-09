@@ -65,11 +65,17 @@ class SessionStore:
         )
         address = parse_uri(value)
         authorize_uri(principal, address)
-        if (
-            address.namespace != "users"
-            or len(address.segments) != 4
-            or address.segments[2] != "sessions"
-        ):
+        is_user_session = (
+            address.namespace == "users"
+            and len(address.segments) == 4
+            and address.segments[2] == "sessions"
+        )
+        is_project_session = (
+            address.namespace == "projects"
+            and len(address.segments) == 3
+            and address.segments[1] == "sessions"
+        )
+        if not (is_user_session or is_project_session):
             raise ValueError("expected one session URI")
         return address.value
 
@@ -163,10 +169,25 @@ class SessionStore:
         except RecordMissing:
             pass
         now = datetime.now(UTC).isoformat()
-        record = self.store.put(principal, uri, self._package((), {}, created_at=now))
+        address = parse_uri(uri)
+        if address.namespace == "projects":
+            from .catalog import Catalog
+
+            Catalog(self.store).get_project(principal, address.segments[0])
+        with self.store.transaction():
+            record = self.store.put(
+                principal, uri, self._package((), {}, created_at=now)
+            )
+            if address.namespace == "projects":
+                Catalog(self.store).register_session(
+                    principal,
+                    address.segments[0],
+                    address.segments[2],
+                    revision_id=record.revision_id,
+                )
         return SessionInfo(
             uri,
-            parse_uri(uri).segments[3],
+            parse_uri(uri).segments[-1],
             record.revision_id,
             "open",
             0,
@@ -181,7 +202,7 @@ class SessionStore:
         metadata = validate_session(self.store.get_document(principal, uri))
         return SessionInfo(
             uri,
-            parse_uri(uri).segments[3],
+            parse_uri(uri).segments[-1],
             record.revision_id,
             metadata.get("status", "open"),
             len(metadata["events"]),
@@ -243,9 +264,21 @@ class SessionStore:
             ),
             expected_revision=current.revision_id,
         )
-        self._queue_compile(
-            principal, record.uri, record.document_id, record.revision_id
-        )
+        address = parse_uri(record.uri)
+        with self.store.transaction():
+            if address.namespace == "projects":
+                from .catalog import Catalog
+
+                Catalog(self.store).register_session(
+                    principal,
+                    address.segments[0],
+                    address.segments[2],
+                    status="closed",
+                    revision_id=record.revision_id,
+                )
+            self._queue_compile(
+                principal, record.uri, record.document_id, record.revision_id
+            )
         return self.get(principal, current.uri)
 
     @staticmethod

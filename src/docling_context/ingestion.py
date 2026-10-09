@@ -18,6 +18,7 @@ from .converters import ConversionResult, Converter, LocalDoclingConverter
 from .local import RecordMissing
 from .models import DocumentRecord, Principal
 from .package import MAX_PACKAGE_BYTES, PackageError, bounded_nodes, load_package
+from .profiles import DESCRIPTOR_PARTS
 from .uri import authorize_uri, parse_uri
 
 
@@ -102,6 +103,7 @@ class Ingestor:
         filename: str | None = None,
         origin_uri: str | None = None,
         force: bool = False,
+        profile_metadata: dict[str, object] | None = None,
     ) -> DocumentRecord:
         address = parse_uri(uri)
         authorize_uri(principal, address)
@@ -158,6 +160,8 @@ class Ingestor:
             if self.summary_provider is None
             else type(self.summary_provider).__qualname__
         )
+        if profile_metadata is not None:
+            options["profile_metadata"] = profile_metadata
         fingerprint = _fingerprint(data, converter_id, options)
         try:
             current = self.store.get_record(principal, address.value)
@@ -182,6 +186,20 @@ class Ingestor:
             assert converter is not None
             conversion = converter.convert(data, name)
             document = load_package(conversion.package)
+
+        if profile_metadata is not None:
+            resource_type = address.segments[0]
+            if address.namespace != "resources" or resource_type not in {
+                "skills",
+                "concepts",
+                "knowledge",
+            }:
+                raise ValueError("profile metadata requires a typed shared resource")
+            document.set_part_text(
+                DESCRIPTOR_PARTS[resource_type],
+                json.dumps(profile_metadata, sort_keys=True),
+                "application/json",
+            )
 
         method = "extractive"
         summary = _fallback_summary(document)

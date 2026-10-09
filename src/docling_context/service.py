@@ -7,6 +7,7 @@ import binascii
 import builtins
 import logging
 import re
+import sqlite3
 import time
 import uuid
 import xml.etree.ElementTree as ET
@@ -14,9 +15,9 @@ from dataclasses import asdict, dataclass
 from threading import RLock
 from typing import Any
 
+from .catalog import Catalog
 from .durable_memory import MemoryService
 from .ingest_queue import IngestQueue
-from .jobs import CollectionWorker
 from .local import LocalContextStore, RecordMissing
 from .models import NodeAddress, Principal
 from .package import MAX_NODE_TEXT_CHARS, PackageError, PackageMissing
@@ -55,6 +56,55 @@ class ListRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class OverviewRequest:
+    limit: int = 100
+    offset: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectRequest:
+    project_id: str
+    title: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectLinkRequest:
+    project_id: str
+    uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceLinksRequest:
+    uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceLinkRequest:
+    source_uri: str
+    target_uri: str
+    relation: str
+    source_revision: str | None = None
+    source_xpath: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeFactsRequest:
+    knowledge_uri: str
+
+
+@dataclass(frozen=True, slots=True)
+class KnowledgeFactRequest:
+    knowledge_uri: str
+    entity_type: str
+    entity_id: str
+    property: str
+    value: Any
+    source_uri: str
+    source_revision: str
+    source_xpath: str
+
+
+@dataclass(frozen=True, slots=True)
 class TreeRequest:
     uri: str = "docling://resources"
     depth: int = 3
@@ -90,6 +140,7 @@ class SearchRequest:
     per_result_tokens: int = 500
     include_context: bool = False
     image_base64: str | None = None
+    project_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +149,7 @@ class IngestRequest:
     filename: str
     data_base64: str
     force: bool = False
+    project_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +164,12 @@ class SessionAppendRequest:
     kind: str
     text: str
     turn_id: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectSessionRequest:
+    project_id: str
+    session_id: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,7 +229,11 @@ def _validate_xpath(xpath: str) -> None:
 class ContextService:
     """Bind an authenticated principal before accepting operation requests."""
 
-    def __init__(self, store: LocalContextStore, principal: Principal):
+    def __init__(
+        self,
+        store: LocalContextStore,
+        principal: Principal,
+    ):
         self.store = store
         self.principal = principal
         self._lock = RLock()
@@ -204,6 +266,107 @@ class ContextService:
                 )
             ]
         )
+
+    def overview(
+        self, request: OverviewRequest
+    ) -> ServiceResult[builtins.list[dict[str, Any]]]:
+        with Catalog(self.store) as catalog:
+            return self._result(
+                catalog.overview(
+                    self.principal, limit=request.limit, offset=request.offset
+                )
+            )
+
+    def project_create(self, request: ProjectRequest) -> ServiceResult[dict[str, Any]]:
+        if request.title is None:
+            raise ServiceError("invalid_request", "project title is required")
+        return self._result(
+            asdict(
+                Catalog(self.store).create_project(
+                    self.principal, request.project_id, request.title
+                )
+            )
+        )
+
+    def project_show(self, request: ProjectRequest) -> ServiceResult[dict[str, Any]]:
+        return self._result(
+            asdict(Catalog(self.store).get_project(self.principal, request.project_id))
+        )
+
+    def project_resources(
+        self, request: ProjectRequest
+    ) -> ServiceResult[builtins.list[dict[str, str]]]:
+        return self._result(
+            Catalog(self.store).project_resources(self.principal, request.project_id)
+        )
+
+    def project_link(
+        self, request: ProjectLinkRequest
+    ) -> ServiceResult[dict[str, str]]:
+        Catalog(self.store).link(self.principal, request.project_id, request.uri)
+        return self._result({"project_id": request.project_id, "uri": request.uri})
+
+    def project_unlink(
+        self, request: ProjectLinkRequest
+    ) -> ServiceResult[dict[str, str]]:
+        Catalog(self.store).unlink(self.principal, request.project_id, request.uri)
+        return self._result({"project_id": request.project_id, "uri": request.uri})
+
+    def resource_links(
+        self, request: ResourceLinksRequest
+    ) -> ServiceResult[builtins.list[dict[str, str | None]]]:
+        return self._result(
+            Catalog(self.store).resource_links(self.principal, request.uri)
+        )
+
+    def resource_projects(
+        self, request: ResourceLinksRequest
+    ) -> ServiceResult[builtins.list[dict[str, str]]]:
+        return self._result(
+            Catalog(self.store).resource_projects(self.principal, request.uri)
+        )
+
+    def resource_link(
+        self, request: ResourceLinkRequest
+    ) -> ServiceResult[dict[str, str]]:
+        Catalog(self.store).link_resources(
+            self.principal,
+            request.source_uri,
+            request.target_uri,
+            request.relation,
+            source_revision=request.source_revision,
+            source_xpath=request.source_xpath,
+        )
+        return self._result(
+            {
+                "source_uri": request.source_uri,
+                "target_uri": request.target_uri,
+                "relation": request.relation,
+            }
+        )
+
+    def knowledge_facts(
+        self, request: KnowledgeFactsRequest
+    ) -> ServiceResult[builtins.list[dict[str, Any]]]:
+        return self._result(
+            Catalog(self.store).knowledge_facts(self.principal, request.knowledge_uri)
+        )
+
+    def knowledge_add_fact(
+        self, request: KnowledgeFactRequest
+    ) -> ServiceResult[dict[str, str]]:
+        fact_id = Catalog(self.store).add_fact(
+            self.principal,
+            request.knowledge_uri,
+            entity_type=request.entity_type,
+            entity_id=request.entity_id,
+            property=request.property,
+            value=request.value,
+            source_uri=request.source_uri,
+            source_revision=request.source_revision,
+            source_xpath=request.source_xpath,
+        )
+        return self._result({"fact_id": fact_id})
 
     def tree(
         self, request: TreeRequest
@@ -336,7 +499,11 @@ class ContextService:
             )
         started = time.monotonic()
         scope = SearchScope(
-            request.uri, request.xpath, request.document_uri, request.tiers
+            request.uri,
+            request.xpath,
+            request.document_uri,
+            request.tiers,
+            request.project_id,
         )
         result = retriever.search(
             self.principal,
@@ -376,6 +543,7 @@ class ContextService:
             data,
             request.filename,
             force=request.force,
+            project_id=request.project_id,
         )
         return self._result(asdict(job))
 
@@ -387,11 +555,9 @@ class ContextService:
                 data["error_code"] = "conversion_failure"
             return self._result(data)
         except KeyError:
-            return self._result(
-                asdict(
-                    CollectionWorker(self.store).get_job(self.principal, request.job_id)
-                )
-            )
+            raise ServiceError(
+                "missing_job", f"ingestion job not found: {request.job_id}"
+            ) from None
 
     def session_append(
         self, request: SessionAppendRequest
@@ -408,6 +574,20 @@ class ContextService:
                 )
             )
         )
+
+    def project_session_start(
+        self, request: ProjectSessionRequest
+    ) -> ServiceResult[dict[str, Any]]:
+        Catalog(self.store).get_project(self.principal, request.project_id)
+        uri = f"docling://projects/{request.project_id}/sessions/{request.session_id}"
+        return self._result(asdict(SessionStore(self.store).start(self.principal, uri)))
+
+    def project_session_close(
+        self, request: ProjectSessionRequest
+    ) -> ServiceResult[dict[str, Any]]:
+        Catalog(self.store).get_project(self.principal, request.project_id)
+        uri = f"docling://projects/{request.project_id}/sessions/{request.session_id}"
+        return self._result(asdict(SessionStore(self.store).close(self.principal, uri)))
 
     def memory_list(
         self, request: MemoryListRequest
@@ -494,6 +674,17 @@ def _dispatch(
     """Dispatch one versioned request and return a stable error envelope."""
     requests = {
         "list": ListRequest,
+        "overview": OverviewRequest,
+        "project_create": ProjectRequest,
+        "project_show": ProjectRequest,
+        "project_resources": ProjectRequest,
+        "project_link": ProjectLinkRequest,
+        "project_unlink": ProjectLinkRequest,
+        "resource_links": ResourceLinksRequest,
+        "resource_projects": ResourceLinksRequest,
+        "resource_link": ResourceLinkRequest,
+        "knowledge_facts": KnowledgeFactsRequest,
+        "knowledge_add_fact": KnowledgeFactRequest,
         "tree": TreeRequest,
         "outline": OutlineRequest,
         "show": ShowRequest,
@@ -501,6 +692,8 @@ def _dispatch(
         "ingest": IngestRequest,
         "job_status": JobStatusRequest,
         "session_append": SessionAppendRequest,
+        "project_session_start": ProjectSessionRequest,
+        "project_session_close": ProjectSessionRequest,
         "memory_list": MemoryListRequest,
         "memory_review": MemoryReviewRequest,
         "memory_recall": MemoryRecallRequest,
@@ -530,6 +723,8 @@ def _dispatch(
         error = {"code": "stale_citation", "message": str(exc)}
     except (TypeError, ValueError) as exc:
         error = {"code": "invalid_request", "message": str(exc)}
+    except sqlite3.IntegrityError as exc:
+        error = {"code": "conflict", "message": str(exc)}
     return {
         "schema_version": SCHEMA_VERSION,
         "operation_id": uuid.uuid4().hex,

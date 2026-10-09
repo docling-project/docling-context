@@ -123,6 +123,22 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
             key: citation[key]
             for key in ("uri", "revision_id", "xpath", "content", "truncated")
         }
+        show_args = [
+            "--store",
+            str(tmp_path),
+            "--tenant",
+            PRINCIPAL.tenant_id,
+            "--user",
+            PRINCIPAL.user_id,
+            "show",
+            URI,
+            "/doclang[1]/text[1]",
+        ]
+        assert dc_main(show_args) == 0
+        table = capsys.readouterr().out
+        assert "Field" in table and "Content" in table and "Koonap Formation" in table
+        assert dc_main([*show_args, "--raw"]) == 0
+        assert capsys.readouterr().out == "Koonap Formation\n"
         assert (
             "<text>Koonap Formation</text>"
             in service.show(ShowRequest(URI, "/doclang[1]/text[1]", format="xml")).data[
@@ -230,6 +246,83 @@ def test_mcp_tools_and_http_token(tmp_path):
                 "https://example.test", "secret", client=client
             )
             assert remote.list(ListRequest()).data == service.list(ListRequest()).data
+
+
+def test_project_and_resource_operations_share_sqlite_catalog(tmp_path):
+    with LocalContextStore(tmp_path) as store:
+        service = ContextService(store, PRINCIPAL)
+        created = call_service(
+            service, "project_create", {"project_id": "geology", "title": "Geology"}
+        )
+        assert created["data"]["project_id"] == "geology"
+        record = Ingestor(store).add_resource(
+            PRINCIPAL,
+            "docling://resources/library/karoo",
+            _package(),
+            filename="karoo.dclx",
+        )
+        from docling_context.catalog import Catalog
+
+        Catalog(store).register_resource(PRINCIPAL, record, "library")
+        linked = call_service(
+            service,
+            "project_link",
+            {"project_id": "geology", "uri": record.uri},
+        )
+        assert linked["data"]["uri"] == record.uri
+        assert call_service(service, "overview", {})["data"][0]["documents"] == 1
+        assert (
+            call_service(service, "resource_projects", {"uri": record.uri})["data"][0][
+                "project_id"
+            ]
+            == "geology"
+        )
+        assert (
+            call_service(service, "project_resources", {"project_id": "geology"})[
+                "data"
+            ][0]["uri"]
+            == record.uri
+        )
+        assert (
+            call_service(
+                service,
+                "project_unlink",
+                {"project_id": "geology", "uri": record.uri},
+            )["data"]["project_id"]
+            == "geology"
+        )
+        assert call_service(service, "overview", {})["data"][0]["documents"] == 0
+        assert (
+            call_service(service, "resource_projects", {"uri": record.uri})["data"]
+            == []
+        )
+        assert store.get_record(PRINCIPAL, record.uri).revision_id == record.revision_id
+        started = call_service(
+            service,
+            "project_session_start",
+            {"project_id": "geology", "session_id": "review"},
+        )
+        assert started["data"]["uri"] == "docling://projects/geology/sessions/review"
+        assert call_service(service, "overview", {})["data"][0]["sessions"] == 1
+        closed = call_service(
+            service,
+            "project_session_close",
+            {"project_id": "geology", "session_id": "review"},
+        )
+        assert closed["data"]["status"] == "closed"
+        server = create_mcp(service)
+        names = {tool.name for tool in asyncio.run(server.list_tools())}
+        assert {
+            "project_show",
+            "project_resources",
+            "resource_links",
+            "knowledge_facts",
+        } <= names
+        assert "project_link" not in names
+        writable = create_mcp(service, allow_writes=True)
+        assert "project_link" in {
+            tool.name for tool in asyncio.run(writable.list_tools())
+        }
 
 
 def test_failed_ingest_reports_stable_conversion_code(tmp_path):

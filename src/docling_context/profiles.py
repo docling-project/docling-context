@@ -15,6 +15,12 @@ from .uri import parse_uri
 
 SESSION_PART = "context/session.json"
 MEMORY_PART = "context/memory.json"
+DESCRIPTOR_PARTS = {
+    "skills": "context/skill.json",
+    "concepts": "context/concept.json",
+    "knowledge": "context/knowledge.json",
+}
+DESCRIPTOR_NAMES = {"skills": "skill", "concepts": "concept", "knowledge": "knowledge"}
 SESSION_KINDS = frozenset({"turn", "tool_call", "tool_result", "feedback"})
 SESSION_STATUSES = frozenset({"open", "closed"})
 MEMORY_KINDS = frozenset({"preference", "fact", "entity", "concept", "procedure"})
@@ -29,6 +35,14 @@ MAX_SESSION_ATTACHMENT_BYTES = 32 * 1024 * 1024
 
 def profile_kind(uri: str) -> str | None:
     address = parse_uri(uri)
+    if (
+        address.namespace == "projects"
+        and len(address.segments) == 3
+        and address.segments[1] == "sessions"
+    ):
+        return "sessions"
+    if address.namespace == "resources" and address.segments[0] == "memories":
+        return "memories"
     if address.namespace != "users":
         return None
     if len(address.segments) == 4 and address.segments[2] == "sessions":
@@ -181,6 +195,42 @@ def validate_memory(document: DocLangXDocument) -> dict[str, Any]:
     return metadata
 
 
+def validate_descriptor(uri: str, document: DocLangXDocument) -> dict[str, Any]:
+    address = parse_uri(uri)
+    if address.namespace != "resources" or address.segments[0] not in DESCRIPTOR_PARTS:
+        raise ValueError("expected a skill, concept, or knowledge URI")
+    resource_type, resource_id = address.segments
+    metadata = _part(document, DESCRIPTOR_PARTS[resource_type])
+    singular = DESCRIPTOR_NAMES[resource_type]
+    if (
+        metadata.get("profile") != f"{singular}-v1"
+        or metadata.get(f"{singular}_id") != resource_id
+        or not isinstance(metadata.get("name"), str)
+        or not 1 <= len(metadata["name"].strip()) <= 200
+        or not isinstance(metadata.get("summary"), str)
+        or len(metadata["summary"]) > 2_000
+    ):
+        raise ValueError(f"invalid {singular} metadata")
+    if resource_type == "concepts":
+        for field in ("entity_types", "relationship_types", "properties"):
+            value = metadata.get(field)
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() or len(item) > 100
+                for item in value
+            ):
+                raise ValueError(f"invalid concept {field}")
+    if resource_type == "knowledge":
+        fields = metadata.get("fields")
+        if not isinstance(fields, dict) or any(
+            not isinstance(name, str)
+            or not name.strip()
+            or kind not in {"text", "integer", "number", "boolean", "json"}
+            for name, kind in fields.items()
+        ):
+            raise ValueError("invalid knowledge fields")
+    return metadata
+
+
 def validate_profile(uri: str, document: DocLangXDocument) -> dict[str, Any] | None:
     kind = profile_kind(uri)
     address = parse_uri(uri)
@@ -188,10 +238,16 @@ def validate_profile(uri: str, document: DocLangXDocument) -> dict[str, Any] | N
         return validate_session(document)
     if kind == "memories":
         metadata = validate_memory(document)
-        if (
-            metadata["kind"] != address.segments[3]
-            or metadata["memory_id"] != address.segments[4]
+        expected_id = (
+            address.segments[1]
+            if address.namespace == "resources"
+            else address.segments[4]
+        )
+        if metadata["memory_id"] != expected_id or (
+            address.namespace == "users" and metadata["kind"] != address.segments[3]
         ):
             raise ValueError("memory package metadata differs from URI")
         return metadata
+    if address.namespace == "resources" and address.segments[0] in DESCRIPTOR_PARTS:
+        return validate_descriptor(uri, document)
     return None

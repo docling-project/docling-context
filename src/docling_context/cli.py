@@ -6,10 +6,10 @@ import argparse
 import hashlib
 import json
 import os
-import re
+import sqlite3
 import sys
-from collections import Counter
-from collections.abc import Mapping
+import uuid
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, time
 from pathlib import Path
@@ -17,6 +17,7 @@ from pathlib import Path
 from tabulate import tabulate  # type: ignore[import-untyped]
 from tqdm import tqdm  # type: ignore[import-untyped]
 
+from .catalog import CATALOG_SCHEMA_VERSION, Catalog, new_document_uri
 from .compiler import MemoryCompiler
 from .conversion_config import PdfConversionConfig
 from .converters import LocalDoclingConverter
@@ -28,17 +29,18 @@ from .embeddings import (
     stored_embedding_provider,
 )
 from .ingestion import Ingestor
-from .jobs import CollectionWorker
 from .local import LocalContextStore
 from .models import Principal
-from .package import bounded_nodes
+from .package import MAX_PACKAGE_BYTES, bounded_nodes
 from .profiles import (
+    DESCRIPTOR_NAMES,
     MAX_ATTACHMENT_BYTES,
     MEMORY_KINDS,
     MEMORY_STATUSES,
     profile_kind,
     validate_memory,
 )
+from .project_context import ProjectContextWorker
 from .retrieval import RetrievalHit, Retriever, SearchScope
 from .sessions import SessionInfo, SessionStore
 from .uri import authorize_uri, parse_uri
@@ -80,7 +82,10 @@ def _status(
 
 
 def _table_or_json(
-    values: list[dict[str, object]], *, headers: tuple[str, ...], json_output: bool
+    values: Sequence[Mapping[str, object]],
+    *,
+    headers: tuple[str, ...],
+    json_output: bool,
 ) -> None:
     if json_output:
         _json(values)
@@ -98,6 +103,19 @@ def _table_or_json(
         )
     else:
         print("No records.")
+
+
+def _rows_or_json_lines(
+    values: Sequence[Mapping[str, object]],
+    *,
+    headers: tuple[str, ...],
+    json_output: bool,
+) -> None:
+    if json_output:
+        for value in values:
+            _json(value)
+    else:
+        _table_or_json(values, headers=headers, json_output=False)
 
 
 def _session_rows(items: tuple[SessionInfo, ...]) -> list[dict[str, object]]:
@@ -204,33 +222,6 @@ def _prefix(value: str) -> str:
     return parse_uri(value.rstrip("/"), prefix=True).value
 
 
-def _collection(value: str) -> str:
-    uri = value if value.startswith("docling://") else f"docling://resources/{value}"
-    address = parse_uri(uri, prefix=True)
-    if address.namespace != "resources" or len(address.segments) != 1:
-        raise ValueError("collection must be one resources segment")
-    return address.value
-
-
-def _slug(value: str) -> str:
-    result = re.sub(r"[^\w.-]+", "-", value, flags=re.UNICODE).strip(".-")
-    if not result or result in {".", ".."}:
-        raise ValueError(f"cannot make a URI segment from {value!r}")
-    if result != value:
-        result += f"-{hashlib.sha256(value.encode()).hexdigest()[:8]}"
-    return result
-
-
-def _uri_for(
-    path: Path, base: Path, collection: str, *, include_extension: bool = False
-) -> str:
-    relative = path.relative_to(base)
-    stem = path.name[:-9] if path.name.lower().endswith(".dclg.xml") else path.stem
-    name = path.name if include_extension else stem
-    segments = [_slug(part) for part in relative.parts[:-1]] + [_slug(name)]
-    return f"{collection}/{'/'.join(segments)}"
-
-
 def _format_extensions() -> dict[str, tuple[str, ...]]:
     try:
         from docling.datamodel.base_models import FormatToExtensions
@@ -285,7 +276,6 @@ def _add_resource(
     args: argparse.Namespace, store: LocalContextStore, principal: Principal
 ) -> None:
     source = args.source.resolve(strict=True)
-    collection = _collection(args.collection)
     extensions = _format_extensions()
     requested = {
         "xml_doclang" if value == "dclg" else value for value in args.from_formats or ()
@@ -299,8 +289,6 @@ def _add_resource(
         return bool(formats and (not requested or formats & requested))
 
     if source.is_dir():
-        if args.uri:
-            raise ValueError("--uri can only be used with one file")
         candidates = source.rglob("*") if args.recursive else source.iterdir()
         paths = sorted(path for path in candidates if path.is_file() and selected(path))
         if not paths:
@@ -317,41 +305,37 @@ def _add_resource(
             raise ValueError("source does not match a supported selected format")
         paths = [source]
         base = source.parent
-    resources = [(path, args.uri or _uri_for(path, base, collection)) for path in paths]
-    collisions = {
-        uri for uri, count in Counter(uri for _, uri in resources).items() if count > 1
-    }
-    resources = [
-        (
-            path,
-            _uri_for(path, base, collection, include_extension=True)
-            if uri in collisions
-            else uri,
-        )
-        for path, uri in resources
-    ]
-    if len({uri for _, uri in resources}) != len(resources):
-        raise ValueError("multiple files map to the same context URI")
     ingestor = Ingestor(
         store,
         allowed_roots=(base,),
         converter=LocalDoclingConverter(_config(args)),
     )
-    worker = CollectionWorker(store)
-    for path, uri in resources:
-        record = ingestor.add_resource(principal, uri, path, force=args.force)
-        address = parse_uri(record.uri)
-        task_id = None
-        if address.namespace == "resources":
-            collection_uri = f"docling://resources/{address.segments[0]}"
-            matches = [
-                job
-                for job in worker.jobs(principal, collection_uri)
-                if job.input_revision == record.revision_id
-            ]
-            task_id = matches[-1].job_id if matches else None
-        _json(
-            {"uri": record.uri, "revision_id": record.revision_id, "task_id": task_id}
+    with Catalog(store) as catalog:
+        if args.project:
+            catalog.get_project(principal, args.project)
+        imported: list[dict[str, object]] = []
+        for path in paths:
+            if path.stat().st_size > MAX_PACKAGE_BYTES:
+                raise ValueError(f"source file is too large: {path}")
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            with store.transaction():
+                uri = catalog.find_source(principal, digest) or new_document_uri()
+                record = ingestor.add_resource(principal, uri, path, force=args.force)
+                catalog.register_resource(principal, record)
+                if args.project:
+                    catalog.link(principal, args.project, record.uri)
+            imported.append(
+                {
+                    "uri": record.uri,
+                    "revision_id": record.revision_id,
+                    "source_sha256": digest,
+                    "project_id": args.project,
+                }
+            )
+        _rows_or_json_lines(
+            imported,
+            headers=("uri", "revision_id", "source_sha256", "project_id"),
+            json_output=args.json,
         )
 
 
@@ -419,14 +403,157 @@ def _parser() -> argparse.ArgumentParser:
         default=Path(
             os.environ.get("DOCLING_CONTEXT_STORE", "~/.local/share/docling-context")
         ).expanduser(),
+        help="Local DCLX and index directory (default: ~/.local/share/docling-context).",
     )
     parser.add_argument(
-        "--tenant", default=os.environ.get("DOCLING_CONTEXT_TENANT", "default")
+        "--tenant",
+        default=os.environ.get("DOCLING_CONTEXT_TENANT", "default"),
+        help="Tenant scope (default: default).",
     )
     parser.add_argument(
-        "--user", default=os.environ.get("DOCLING_CONTEXT_USER", "local")
+        "--user",
+        default=os.environ.get("DOCLING_CONTEXT_USER", "local"),
+        help="User scope (default: local).",
     )
     commands = parser.add_subparsers(dest="command", required=True)
+    init = commands.add_parser("init", help="Initialize the local SQLite store")
+    init.add_argument(
+        "--json", action="store_true", help="Print JSON instead of a table"
+    )
+    overview = commands.add_parser(
+        "overview", help="List projects and linked resource counts"
+    )
+    overview.add_argument("--json", action="store_true")
+    overview.add_argument("--limit", type=int, default=100)
+    overview.add_argument("--offset", type=int, default=0)
+    project = commands.add_parser(
+        "project", help="Create and inspect projects and links"
+    )
+    project_commands = project.add_subparsers(dest="project_command", required=True)
+    project_create = project_commands.add_parser("create", help="Create a project")
+    project_create.add_argument("project_id")
+    project_create.add_argument("--title", required=True)
+    project_show = project_commands.add_parser("show", help="Show project details")
+    project_show.add_argument("project_id")
+    for name in ("link", "unlink"):
+        command = project_commands.add_parser(
+            name, help=f"{'Link' if name == 'link' else 'Unlink'} a shared resource"
+        )
+        command.add_argument("project_id")
+        command.add_argument("uri")
+    project_list = project_commands.add_parser(
+        "resources", help="List linked resources"
+    )
+    project_list.add_argument("project_id")
+    project_refresh = project_commands.add_parser(
+        "refresh", help="Queue abstract and overview regeneration"
+    )
+    project_refresh.add_argument("project_id")
+    project_jobs = project_commands.add_parser(
+        "jobs", help="Show abstract and overview generation jobs"
+    )
+    project_jobs.add_argument("project_id")
+    project_commands.add_parser("worker", help="Process one queued project context job")
+    for name in ("description", "abstract", "overview"):
+        command = project_commands.add_parser(
+            f"set-{name}", help=f"Set the project {name} document"
+        )
+        command.add_argument("project_id")
+        command.add_argument("source", type=Path, help="DCLX or DCLG source file")
+    project_session_start = project_commands.add_parser(
+        "session-start", help="Start a project session"
+    )
+    project_session_start.add_argument("project_id")
+    project_session_start.add_argument(
+        "--id", help="Session ID (default: generated UUID)"
+    )
+    project_session_list = project_commands.add_parser(
+        "session-list", help="List project sessions"
+    )
+    project_session_list.add_argument("project_id")
+    project_session_append = project_commands.add_parser(
+        "session-append", help="Append a project session event"
+    )
+    project_session_append.add_argument("project_id")
+    project_session_append.add_argument("session_id")
+    project_session_append.add_argument("text")
+    project_session_append.add_argument(
+        "--kind",
+        choices=("turn", "tool_call", "tool_result", "feedback"),
+        required=True,
+    )
+    project_session_append.add_argument("--key", required=True)
+    for name in ("session-show", "session-close"):
+        command = project_commands.add_parser(
+            name,
+            help=(
+                "Show a project session"
+                if name == "session-show"
+                else "Close a project session"
+            ),
+        )
+        command.add_argument("project_id")
+        command.add_argument("session_id")
+    for command in project_commands.choices.values():
+        command.add_argument(
+            "--json", action="store_true", help="Print JSON instead of a table"
+        )
+    resource = commands.add_parser("resource", help="Create a shared DCLX resource")
+    resource_commands = resource.add_subparsers(dest="resource_command", required=True)
+    resource_add = resource_commands.add_parser(
+        "add", help="Import a shared DCLX resource"
+    )
+    resource_add.add_argument(
+        "type", choices=("memories", "skills", "concepts", "knowledge")
+    )
+    resource_add.add_argument("source", type=Path, help="DCLX or DCLG source file")
+    resource_add.add_argument(
+        "--metadata",
+        type=Path,
+        help="JSON metadata for a skill, concept, or knowledge descriptor",
+    )
+    resource_add.add_argument("--project", help="Link the new resource to a project")
+    resource_link = resource_commands.add_parser(
+        "link", help="Link two shared resources"
+    )
+    resource_link.add_argument("source_uri")
+    resource_link.add_argument("target_uri")
+    resource_link.add_argument("--relation", required=True)
+    resource_link.add_argument("--source-revision")
+    resource_link.add_argument("--source-xpath")
+    resource_links = resource_commands.add_parser(
+        "links", help="List links for a shared resource"
+    )
+    resource_links.add_argument("uri")
+    resource_projects = resource_commands.add_parser(
+        "projects", help="List projects linked to a shared resource"
+    )
+    resource_projects.add_argument("uri")
+    for command in resource_commands.choices.values():
+        command.add_argument(
+            "--json", action="store_true", help="Print JSON instead of a table"
+        )
+    knowledge = commands.add_parser(
+        "knowledge", help="Write and inspect cited structured facts"
+    )
+    knowledge_commands = knowledge.add_subparsers(
+        dest="knowledge_command", required=True
+    )
+    knowledge_add = knowledge_commands.add_parser(
+        "add-fact", help="Add a schema-checked fact with an exact citation"
+    )
+    for field in ("knowledge_uri", "entity_type", "entity_id", "property", "value"):
+        knowledge_add.add_argument(field)
+    for field in ("source-uri", "source-revision", "source-xpath"):
+        knowledge_add.add_argument(f"--{field}", required=True)
+    knowledge_facts = knowledge_commands.add_parser(
+        "facts", help="List facts in a knowledge dataset"
+    )
+    knowledge_facts.add_argument("knowledge_uri")
+    for command in knowledge_commands.choices.values():
+        command.add_argument(
+            "--json", action="store_true", help="Print JSON instead of a table"
+        )
     status = commands.add_parser("status", help="Show store and job counts")
     status.add_argument(
         "--json", action="store_true", help="Print JSON instead of a table."
@@ -451,8 +578,11 @@ def _parser() -> argparse.ArgumentParser:
     lex_status.add_argument(
         "--json", action="store_true", help="Print JSON instead of a table."
     )
-    lex_commands.add_parser(
+    lex_rebuild = lex_commands.add_parser(
         "rebuild", help="Rebuild search records from stored DCLX documents"
+    )
+    lex_rebuild.add_argument(
+        "--json", action="store_true", help="Print JSON instead of a table"
     )
     vector = index_commands.add_parser(
         "vector", help="Inspect or rebuild vector embeddings"
@@ -483,6 +613,9 @@ def _parser() -> argparse.ArgumentParser:
         default="auto",
         help="Embedding runtime (default: MLX for supported Apple Silicon models, else ONNX).",
     )
+    vector_rebuild.add_argument(
+        "--json", action="store_true", help="Print JSON instead of a table"
+    )
     add = commands.add_parser(
         "add-resource",
         help="Import one supported document or a folder of documents",
@@ -507,15 +640,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FORMAT",
         help="Include a source format (repeatable; default: all; e.g. pdf, docx, xlsx, image).",
     )
-    add.add_argument(
-        "--collection",
-        default="documents",
-        help="Collection for generated resource URIs (default: documents).",
-    )
-    add.add_argument(
-        "--uri",
-        help="Exact URI for a single file (default: derived from collection and filename).",
-    )
+    add.add_argument("--project", help="Link imported documents to this project")
     add.add_argument(
         "--config",
         type=Path,
@@ -566,42 +691,53 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Create a new revision for unchanged input (default: off).",
     )
-    task = commands.add_parser("task", help="Inspect collection-summary jobs")
-    task_commands = task.add_subparsers(dest="task_command", required=True)
-    task_status = task_commands.add_parser("status")
-    task_status.add_argument("job_id")
-    task_status.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table."
+    add.add_argument(
+        "--json", action="store_true", help="Print JSON lines instead of a table"
     )
-    jobs = commands.add_parser(
-        "jobs", help="Inspect durable ingestion or collection jobs"
-    )
+    jobs = commands.add_parser("jobs", help="Inspect durable ingestion jobs")
     jobs_commands = jobs.add_subparsers(dest="jobs_command", required=True)
     jobs_status = jobs_commands.add_parser("status", help="Show one job by ID")
     jobs_status.add_argument("job_id")
     jobs_status.add_argument("--json", action="store_true")
-    worker = commands.add_parser("worker", help="Process queued collection summaries")
-    worker.add_argument("--once", action="store_true")
     listing = commands.add_parser("ls", help="List direct children")
     listing.add_argument("uri")
+    listing.add_argument(
+        "--json", action="store_true", help="Print JSON lines instead of a table"
+    )
     tree = commands.add_parser("tree", help="Walk a context subtree")
     tree.add_argument("uri")
     tree.add_argument("-L", "--depth", type=int, default=2)
+    tree_output = tree.add_mutually_exclusive_group()
+    tree_output.add_argument(
+        "--json", action="store_true", help="Print JSON lines instead of a table"
+    )
+    tree_output.add_argument(
+        "--raw", action="store_true", help="Print an indented URI tree"
+    )
     outline = commands.add_parser("outline", help="Read a document TOC sidecar")
     outline.add_argument("uri")
     outline.add_argument("--revision", help="Immutable document revision")
-    outline.add_argument("--json", action="store_true")
+    outline_output = outline.add_mutually_exclusive_group()
+    outline_output.add_argument("--json", action="store_true")
+    outline_output.add_argument("--raw", action="store_true", help="Print TOC XML only")
     show = commands.add_parser("show", help="Read one cited DocLang node")
     show.add_argument("uri")
     show.add_argument("xpath")
     show.add_argument("--revision", help="Immutable document revision")
     show.add_argument("--format", choices=("text", "xml"), default="text")
     show.add_argument("--max-chars", type=int, default=8_192)
-    show.add_argument("--json", action="store_true")
+    show_output = show.add_mutually_exclusive_group()
+    show_output.add_argument("--json", action="store_true")
+    show_output.add_argument(
+        "--raw", action="store_true", help="Print node content only"
+    )
     for name in ("find", "grep"):
         search = commands.add_parser(name, help="Bounded lexical lookup")
         search.add_argument("term")
         search.add_argument("--uri", default="docling://resources/")
+        search.add_argument(
+            "--json", action="store_true", help="Print JSON lines instead of a table"
+        )
     retrieval = commands.add_parser(
         "search", help="Search indexed DocLang nodes with exact citations"
     )
@@ -621,6 +757,9 @@ def _parser() -> argparse.ArgumentParser:
         "--uri",
         default="docling://resources/",
         help="Authorized URI subtree (default: all resources).",
+    )
+    retrieval.add_argument(
+        "--project", help="Search only resources linked to this project"
     )
     retrieval.add_argument(
         "--document", help="Restrict to one document URI (default: all in scope)."
@@ -1049,9 +1188,293 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     principal = Principal(args.tenant, args.user)
     try:
+        if args.command == "init":
+            with LocalContextStore(args.store):
+                pass
+            _status(
+                {
+                    "catalog_schema_version": CATALOG_SCHEMA_VERSION,
+                    "store": str(args.store.resolve()),
+                },
+                json_output=args.json,
+            )
+            return 0
+        if args.command == "overview":
+            with LocalContextStore(args.store) as store, Catalog(store) as catalog:
+                rows = catalog.overview(principal, limit=args.limit, offset=args.offset)
+            _table_or_json(
+                rows,
+                headers=(
+                    "project_id",
+                    "title",
+                    "documents",
+                    "memories",
+                    "skills",
+                    "concepts",
+                    "knowledge",
+                    "sessions",
+                ),
+                json_output=args.json,
+            )
+            return 0
         with LocalContextStore(args.store) as store:
-            worker = CollectionWorker(store)
-            if args.command == "status":
+            if args.command == "project":
+                with Catalog(store) as catalog:
+                    if args.project_command == "create":
+                        _status(
+                            asdict(
+                                catalog.create_project(
+                                    principal, args.project_id, args.title
+                                )
+                            ),
+                            json_output=args.json,
+                        )
+                    elif args.project_command == "show":
+                        _status(
+                            asdict(catalog.get_project(principal, args.project_id)),
+                            json_output=args.json,
+                        )
+                    elif args.project_command == "resources":
+                        _rows_or_json_lines(
+                            catalog.project_resources(principal, args.project_id),
+                            headers=("resource_type", "resource_id", "uri"),
+                            json_output=args.json,
+                        )
+                    elif args.project_command == "refresh":
+                        catalog.refresh_project(principal, args.project_id)
+                        _status(
+                            {"project_id": args.project_id, "status": "queued"},
+                            json_output=args.json,
+                        )
+                    elif args.project_command == "jobs":
+                        _table_or_json(
+                            catalog.context_jobs(principal, args.project_id),
+                            headers=(
+                                "kind",
+                                "status",
+                                "generation",
+                                "attempts",
+                                "last_error",
+                                "updated_at",
+                            ),
+                            json_output=args.json,
+                        )
+                    elif args.project_command == "worker":
+                        context_job = ProjectContextWorker(store).run_once()
+                        _status(
+                            asdict(context_job) if context_job else {"job": "none"},
+                            json_output=args.json,
+                        )
+                    elif args.project_command.startswith("set-"):
+                        kind = args.project_command.removeprefix("set-")
+                        catalog.get_project(principal, args.project_id)
+                        source = args.source.resolve(strict=True)
+                        if not source.name.lower().endswith(
+                            (".dclx", ".dclg", ".dclg.xml")
+                        ):
+                            raise ValueError(
+                                "project context source must be DCLX or DCLG"
+                            )
+                        uri = f"docling://projects/{args.project_id}/.{kind}.dclx"
+                        record = Ingestor(
+                            store, allowed_roots=(source.parent,)
+                        ).add_resource(principal, uri, source)
+                        catalog.set_project_document(
+                            principal, args.project_id, kind, record
+                        )
+                        _status(
+                            {"uri": record.uri, "revision_id": record.revision_id},
+                            json_output=args.json,
+                        )
+                    elif args.project_command == "session-list":
+                        _rows_or_json_lines(
+                            catalog.project_sessions(principal, args.project_id),
+                            headers=("session_id", "status", "owner_id"),
+                            json_output=args.json,
+                        )
+                    elif args.project_command.startswith("session-"):
+                        catalog.get_project(principal, args.project_id)
+                        session_id = (
+                            args.id or uuid.uuid4().hex
+                            if args.project_command == "session-start"
+                            else args.session_id
+                        )
+                        uri = f"docling://projects/{args.project_id}/sessions/{session_id}"
+                        sessions = SessionStore(store)
+                        if args.project_command == "session-start":
+                            info = sessions.start(principal, uri)
+                            catalog.register_session(
+                                principal, args.project_id, session_id
+                            )
+                            _status(asdict(info), json_output=args.json)
+                        elif args.project_command == "session-append":
+                            catalog.project_sessions(principal, args.project_id)
+                            info = sessions.get(principal, uri)
+                            event = sessions.append(
+                                principal,
+                                info.uri,
+                                key=args.key,
+                                kind=args.kind,
+                                text=args.text,
+                            )
+                            _status(asdict(event), json_output=args.json)
+                        elif args.project_command == "session-close":
+                            info = sessions.close(principal, uri)
+                            catalog.register_session(
+                                principal,
+                                args.project_id,
+                                session_id,
+                                status="closed",
+                            )
+                            _status(asdict(info), json_output=args.json)
+                        else:
+                            _status(
+                                asdict(sessions.get(principal, uri)),
+                                json_output=args.json,
+                            )
+                    elif args.project_command == "link":
+                        catalog.link(principal, args.project_id, args.uri)
+                        _status(
+                            {"project_id": args.project_id, "uri": args.uri},
+                            json_output=args.json,
+                        )
+                    else:
+                        catalog.unlink(principal, args.project_id, args.uri)
+                        _status(
+                            {"project_id": args.project_id, "uri": args.uri},
+                            json_output=args.json,
+                        )
+            elif args.command == "resource":
+                with Catalog(store) as catalog:
+                    if args.resource_command == "links":
+                        _rows_or_json_lines(
+                            catalog.resource_links(principal, args.uri),
+                            headers=(
+                                "source_uri",
+                                "target_uri",
+                                "relation",
+                                "source_revision",
+                                "source_xpath",
+                            ),
+                            json_output=args.json,
+                        )
+                    elif args.resource_command == "projects":
+                        _rows_or_json_lines(
+                            catalog.resource_projects(principal, args.uri),
+                            headers=("project_id", "title"),
+                            json_output=args.json,
+                        )
+                    elif args.resource_command == "link":
+                        catalog.link_resources(
+                            principal,
+                            args.source_uri,
+                            args.target_uri,
+                            args.relation,
+                            source_revision=args.source_revision,
+                            source_xpath=args.source_xpath,
+                        )
+                        _status(
+                            {
+                                "source_uri": args.source_uri,
+                                "target_uri": args.target_uri,
+                                "relation": args.relation,
+                            },
+                            json_output=args.json,
+                        )
+                    else:
+                        source = args.source.resolve(strict=True)
+                        if not source.name.lower().endswith(
+                            (".dclx", ".dclg", ".dclg.xml")
+                        ):
+                            raise ValueError(
+                                "shared resource source must be DCLX or DCLG"
+                            )
+                        if args.project:
+                            catalog.get_project(principal, args.project)
+                        uri = f"docling://resources/{args.type}/{uuid.uuid4().hex}"
+                        metadata = None
+                        if args.type in DESCRIPTOR_NAMES:
+                            supplied = (
+                                json.loads(args.metadata.read_text())
+                                if args.metadata is not None
+                                else {}
+                            )
+                            if not isinstance(supplied, dict):
+                                raise ValueError(
+                                    "resource metadata must be a JSON object"
+                                )
+                            singular = DESCRIPTOR_NAMES[args.type]
+                            metadata = {
+                                **supplied,
+                                "profile": f"{singular}-v1",
+                                f"{singular}_id": uri.rsplit("/", 1)[-1],
+                                "name": supplied.get("name", source.stem),
+                                "summary": supplied.get("summary", ""),
+                            }
+                            if args.type == "concepts":
+                                for field in (
+                                    "entity_types",
+                                    "relationship_types",
+                                    "properties",
+                                ):
+                                    metadata.setdefault(field, [])
+                            elif args.type == "knowledge":
+                                metadata.setdefault("fields", {})
+                        record = Ingestor(
+                            store, allowed_roots=(source.parent,)
+                        ).add_resource(
+                            principal, uri, source, profile_metadata=metadata
+                        )
+                        with store.transaction():
+                            catalog.register_resource(principal, record, args.type)
+                            if args.type == "knowledge":
+                                assert metadata is not None
+                                fields = metadata["fields"]
+                                assert isinstance(fields, dict)
+                                catalog.register_knowledge_dataset(
+                                    principal, uri, fields
+                                )
+                            if args.project:
+                                catalog.link(principal, args.project, uri)
+                        _status(
+                            {
+                                "uri": uri,
+                                "revision_id": record.revision_id,
+                                "project_id": args.project,
+                            },
+                            json_output=args.json,
+                        )
+            elif args.command == "knowledge":
+                catalog = Catalog(store)
+                if args.knowledge_command == "add-fact":
+                    fact_id = catalog.add_fact(
+                        principal,
+                        args.knowledge_uri,
+                        entity_type=args.entity_type,
+                        entity_id=args.entity_id,
+                        property=args.property,
+                        value=json.loads(args.value),
+                        source_uri=args.source_uri,
+                        source_revision=args.source_revision,
+                        source_xpath=args.source_xpath,
+                    )
+                    _status({"fact_id": fact_id}, json_output=args.json)
+                else:
+                    _table_or_json(
+                        catalog.knowledge_facts(principal, args.knowledge_uri),
+                        headers=(
+                            "fact_id",
+                            "entity_type",
+                            "entity_id",
+                            "property",
+                            "value",
+                            "source_uri",
+                            "source_revision",
+                            "source_xpath",
+                        ),
+                        json_output=args.json,
+                    )
+            elif args.command == "status":
                 counts = {
                     table: store.db.execute(
                         f"SELECT COUNT(*) FROM {table} WHERE tenant_id=?",
@@ -1062,13 +1485,17 @@ def main(argv: list[str] | None = None) -> int:
                 user_prefix = (
                     f"docling://users/{principal.tenant_id}/{principal.user_id}/"
                 )
-                for name in ("sessions", "memories"):
-                    prefix = user_prefix + name + "/"
-                    counts[name] = store.db.execute(
-                        """SELECT COUNT(*) FROM documents WHERE tenant_id=?
-                           AND substr(uri,1,?)=?""",
-                        (principal.tenant_id, len(prefix), prefix),
-                    ).fetchone()[0]
+                session_prefix = user_prefix + "sessions/"
+                counts["sessions"] = store.db.execute(
+                    """SELECT COUNT(*) FROM documents WHERE tenant_id=? AND
+                       ((substr(uri,1,?)=?) OR uri LIKE 'docling://projects/%/sessions/%')""",
+                    (principal.tenant_id, len(session_prefix), session_prefix),
+                ).fetchone()[0]
+                counts["memories"] = store.db.execute(
+                    """SELECT COUNT(*) FROM dc_resources WHERE tenant_id=?
+                       AND resource_type='memories'""",
+                    (principal.tenant_id,),
+                ).fetchone()[0]
                 counts["memory_jobs"] = store.db.execute(
                     """SELECT COUNT(*) FROM memory_compile_jobs
                        WHERE tenant_id=? AND user_id=?""",
@@ -1104,7 +1531,7 @@ def main(argv: list[str] | None = None) -> int:
                                     bar, done, size
                                 ),
                             )
-                        _json(rebuild_result)
+                        _status(rebuild_result, json_output=args.json)
                 else:
                     if args.index_operation == "status":
                         _status(
@@ -1139,32 +1566,22 @@ def main(argv: list[str] | None = None) -> int:
                                     bar, done, size
                                 ),
                             )
-                        _json(store.index_status(principal))
+                        _status(store.index_status(principal), json_output=args.json)
             elif args.command == "add-resource":
                 _add_resource(args, store, principal)
             elif args.command == "session":
                 _session_command(args, store, principal)
             elif args.command == "memory":
                 _memory_command(args, store, principal)
-            elif args.command == "task":
-                _status(
-                    asdict(worker.get_job(principal, args.job_id)),
+            elif args.command == "ls":
+                _rows_or_json_lines(
+                    [
+                        asdict(entry)
+                        for entry in store.list_children(principal, _prefix(args.uri))
+                    ],
+                    headers=("uri", "kind", "document_id", "revision_id"),
                     json_output=args.json,
                 )
-            elif args.command == "worker":
-                if args.once:
-                    job = worker.run_once()
-                    _json({"job_id": job.job_id if job else None})
-                else:
-                    from threading import Event
-
-                    try:
-                        worker.run_forever(Event())
-                    except KeyboardInterrupt:
-                        pass
-            elif args.command == "ls":
-                for entry in store.list_children(principal, _prefix(args.uri)):
-                    _json(asdict(entry))
             elif args.command == "jobs":
                 from .service import ContextService, JobStatusRequest
 
@@ -1175,10 +1592,18 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 _status(job_data, json_output=args.json)
             elif args.command == "tree":
-                for entry in store.walk(
+                entries = store.walk(
                     principal, _prefix(args.uri), depth=args.depth, limit=1_000
-                ):
-                    print(f"{'  ' * (entry.depth - 1)}{entry.uri}")
+                )
+                if args.raw:
+                    for entry in entries:
+                        print(f"{'  ' * (entry.depth - 1)}{entry.uri}")
+                else:
+                    _rows_or_json_lines(
+                        [asdict(entry) for entry in entries],
+                        headers=("depth", "uri", "kind", "document_id", "revision_id"),
+                        json_output=args.json,
+                    )
             elif args.command in {"outline", "show"}:
                 from .service import ContextService, OutlineRequest, ShowRequest
 
@@ -1187,10 +1612,10 @@ def main(argv: list[str] | None = None) -> int:
                     value = service.outline(
                         OutlineRequest(args.uri, args.revision)
                     ).data
-                    if args.json:
-                        _json(value)
-                    else:
+                    if args.raw:
                         print(value["toc_xml"])
+                    else:
+                        _status(value, json_output=args.json)
                 else:
                     value = service.show(
                         ShowRequest(
@@ -1201,10 +1626,10 @@ def main(argv: list[str] | None = None) -> int:
                             args.format,
                         )
                     ).data
-                    if args.json:
-                        _json(value)
-                    else:
+                    if args.raw:
                         print(value["content"])
+                    else:
+                        _status(value, json_output=args.json)
             elif args.command in {"find", "grep"}:
                 hits = _scan(store, principal, args.term, _prefix(args.uri))
                 if args.command == "find":
@@ -1214,8 +1639,11 @@ def main(argv: list[str] | None = None) -> int:
                         ),
                         reverse=True,
                     )
-                for hit in hits:
-                    _json(hit)
+                _rows_or_json_lines(
+                    hits,
+                    headers=("uri", "revision_id", "xpath", "text", "page"),
+                    json_output=args.json,
+                )
             elif args.command == "search":
                 state = store.db.execute(
                     "SELECT model_id FROM vector_state WHERE singleton=1"
@@ -1245,6 +1673,7 @@ def main(argv: list[str] | None = None) -> int:
                         xpath=args.xpath,
                         document_uri=args.document,
                         tiers=tuple(args.tier) if args.tier else (0, 1, 2),
+                        project_id=args.project,
                     ),
                     k=args.k,
                     mode=mode,
@@ -1262,7 +1691,14 @@ def main(argv: list[str] | None = None) -> int:
                         print(
                             f"Showing {len(result.hits)} of {result.total_hits} matching nodes."
                         )
-    except (OSError, ValueError, RuntimeError, KeyError, PermissionError) as exc:
+    except (
+        OSError,
+        ValueError,
+        RuntimeError,
+        KeyError,
+        PermissionError,
+        sqlite3.Error,
+    ) as exc:
         print(f"dc: {exc}", file=sys.stderr)
         return 1
     return 0

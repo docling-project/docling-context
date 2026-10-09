@@ -185,6 +185,7 @@ class SearchScope:
     xpath: str | None = None
     document_uri: str | None = None
     tiers: tuple[int, ...] = (0, 1, 2)
+    project_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +277,16 @@ class Retriever:
         ]
         prefix = base + "/"
         params: list[object] = [principal.tenant_id, base, len(prefix), prefix]
+        if scope.project_id is not None:
+            from .catalog import Catalog
+
+            with Catalog(self.store) as catalog:
+                members = catalog.project_resource_uris(principal, scope.project_id)
+            if members:
+                clauses.append(f"r.uri IN ({','.join('?' for _ in members)})")
+                params.extend(members)
+            else:
+                clauses.append("0=1")
         if scope.document_uri is not None:
             clauses.append("r.uri=?")
             params.append(doc.value)

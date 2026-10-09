@@ -1,7 +1,12 @@
 # Durable memory
 
+Reviewed memories and compiled project session outcomes are DCLX packages in
+the flat `docling://resources/memories/{memory_id}` list. A memory may link to
+several projects. `dc resource add memories FILE [--project ID]` accepts a
+DCLX package with a valid memory profile.
+
 `MemoryService` stores each claim as a DCLX package under
-`docling://users/{tenant}/{user}/memories/{kind}/{id}`. Supported kinds are
+`docling://resources/memories/{memory_id}`. Supported kinds are
 `preference`, `fact`, `entity`, `concept`, and `procedure`. The DocLang body
 contains the readable claim and explanation. `context/memory.json` stores
 confidence, status, author, optional validity dates, source citations, conflict
@@ -43,7 +48,7 @@ pass `accepted=True`. Compiler proposals require `accept` before they enter
 search. `reject`, `correct`, and `delete` write new package revisions. A
 correction is user authored, accepted, and records the revision it supersedes.
 `purge` physically removes a deleted claim and its revisions. `search` returns
-accepted memories within the current user. `recall(principal, session_id, query)`
+accepted memories within the tenant. `recall(principal, session_id, query)`
 records delivered memory and revision IDs; it suppresses repeats in that
 session, while a corrected revision can be delivered again.
 `list` includes all non-purged statuses by default and can filter by status,
@@ -52,5 +57,6 @@ search, recall, and purge; see the [CLI guide](cli.md).
 
 Deleting a cited session or document checks dependent memories. A claim with
 no surviving cited source becomes `proposed` and leaves the retrieval index.
-All operations check tenant and user ownership. Sharing is not exposed by this
-API.
+Reads are tenant scoped. Review and purge require the memory's owner.
+Closing a project session queues compilation; the worker links each resulting
+memory to that project.

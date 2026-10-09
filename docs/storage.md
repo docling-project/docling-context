@@ -1,46 +1,49 @@
-# Storage, revisions, and jobs
+# Storage and project catalog
 
-`LocalContextStore` stores metadata in SQLite and DCLX blobs under SHA-256
-paths. A logical URI points to the latest revision; old revisions remain
-addressable by document ID, revision ID, and XPath. Every write also inserts
-an outbox event in the same SQLite transaction. Blob reads verify their hash.
+The local store contains `context.sqlite3` and content-addressed DCLX packages.
+SQLite holds projects, resource identities and revisions, project membership,
+typed resource links, project sessions, cited knowledge facts, jobs, and search
+indexes. `dc init` creates the store at `~/.local/share/docling-context` by
+default. Use `DOCLING_CONTEXT_STORE` or `dc --store PATH` to select another
+location. Back up the SQLite database and package directory together.
 
-Resource URIs have the form `docling://resources/{collection}/{path}`. User
-URIs have the form
-`docling://users/{tenant}/{user}/{memories|sessions|skills}/{path}`. Tenant
-ownership is checked on reads and writes. Local file ingestion requires an
-explicit `allowed_roots` entry; bytes can be ingested without filesystem access.
+## Shared resources
 
-Each ingested document is a DCLX package containing `document.xml` (L2), a
-DocLang summary (L0), and a DocLang TOC (L1). Source assets and sidecars other
-than the generated summary and TOC are kept from DCLX input. `context/manifest.json` records the
-summary method and exact source revision. Source hashes, origin, converter
-version/options, and warnings are in the revision's provenance.
+Library documents live at `docling://resources/library/{doc_id}`. The other
+flat lists are `memories`, `skills`, `concepts`, and `knowledge`. A package
+contains DocLang content (L2), a summary (L0), and a TOC (L1). The source
+binary SHA-256 is distinct from the DCLX package hash. `add-resource` checks
+the source hash within the tenant before conversion and reuses the library URI
+when it exists. `--force` writes a new revision. Revision provenance records
+the original filename, origin, converter, options, and warnings.
 
-Collection summaries are separate DCLX documents at
-`docling://resources/{collection}/_context/summary`. Writes and deletes mark
-the collection stale and enqueue a durable job. `CollectionWorker` claims jobs
-with leases, retries failures, and can resume after a crash without adding a
-duplicate summary revision. Its `status` method exposes staleness and the
-summary revision ID.
+`dc resource add TYPE FILE` imports a DCLX or DCLG resource. Skills, concepts,
+and knowledge descriptors require type-specific JSON metadata; inspect
+`dc resource add --help` for the shape. `dc resource link SOURCE_URI TARGET_URI
+--relation NAME` records a typed relationship; `dc resource links URI` lists
+both incoming and outgoing links. An optional source revision and XPath make a
+relationship citable. `dc knowledge add-fact` stores a typed fact in SQLite
+with an exact source citation.
 
-Schema version 3 adds `retrieval_units`, an FTS table, and `vector_state`.
-Schema version 4 adds `vector_members`, which records the stable IDs in each
-snapshot so later outbox events can remove replaced or deleted nodes.
-Schema version 5 records picture asset paths on retrieval units. Existing
-stores can run `dc index lex rebuild` to add picture units from saved DCLX
-packages, then `dc index vector rebuild` to embed them with an image-capable
-model.
-Schema version 6 records each source node's active heading in `section_xpath`.
-Rebuild the lexical index after upgrading an existing store to populate that
-field for previously indexed nodes.
-Document writes replace their retrieval records in the same SQLite transaction
-as the revision and outbox event; deletes remove those records. Existing stores
-are backfilled from their DCLX packages on upgrade. The FTS table is a
-rebuildable lexical projection. Optional vector snapshots are held in
-`vectors-{generation}.tvim` files and can be reconstructed from SQLite
-embedding bytes. The package and current revision remain authoritative for
-all citations.
+## Projects
 
-The local and in-memory stores implement the same basic `ContextStore`
-contract, leaving room for another storage backend later.
+`dc project create ID --title TITLE` creates a project. `project link` and
+`project unlink` change membership; unlinking does not delete a resource.
+`project resources` lists a project's links; `resource projects URI` lists
+projects linked to one resource. `set-description`, `set-abstract`, and
+`set-overview` attach project-owned DCLX documents. Project creation,
+membership changes, and description changes queue abstract and overview
+refresh jobs. Run `dc project worker` to process one, `dc project jobs ID` to
+inspect them, or `dc project refresh ID` to queue another refresh.
+
+`dc overview` includes projects with no links and counts each linked resource
+once. `dc search QUERY --project ID` restricts retrieval to linked resources.
+Results cite canonical URI, immutable revision ID, and XPath.
+
+Project sessions live at `docling://projects/{project_id}/sessions/{id}`.
+`dc project session-start`, `session-append`, `session-close`, and
+`session-list` manage them. Closing a project session queues memory compilation;
+run `dc memory worker --once` to produce proposed shared memories linked back
+to the project. The sessions column in `dc overview` counts project sessions.
+
+This is a fresh-start layout. There is no migration tool for older stores.

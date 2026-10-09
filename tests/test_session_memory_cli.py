@@ -115,7 +115,7 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
     proposal = json.loads(output)[0]
     assert code == 0 and proposal["status"] == "proposed"
     uri = proposal["uri"]
-    code, output, _ = _run(capsys, tmp_path, "grep", "concise", "--uri", uri)
+    code, output, _ = _run(capsys, tmp_path, "grep", "concise", "--uri", uri, "--json")
     assert code == 0 and not output
     code, output, _ = _run(
         capsys, tmp_path, "memory", "list", "--kind", "preference", "--json"
@@ -124,7 +124,7 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
     code, output, _ = _run(capsys, tmp_path, "memory", "list", "--until", day, "--json")
     assert code == 0 and len(json.loads(output)) == 1
     assert _run(capsys, tmp_path, "memory", "accept", uri, "--json")[0] == 0
-    code, output, _ = _run(capsys, tmp_path, "grep", "concise", "--uri", uri)
+    code, output, _ = _run(capsys, tmp_path, "grep", "concise", "--uri", uri, "--json")
     assert code == 0 and output
     code, output, _ = _run(capsys, tmp_path, "memory", "search", "concise", "--json")
     assert code == 0 and json.loads(output)[0]["uri"] == uri
@@ -141,14 +141,14 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
         capsys, tmp_path, "memory", "list", "--status", "deleted", "--json"
     )
     assert code == 0 and len(json.loads(output)) == 1
-    code, output, _ = _run(capsys, tmp_path, "grep", "concise", "--uri", uri)
+    code, output, _ = _run(capsys, tmp_path, "grep", "concise", "--uri", uri, "--json")
     assert code == 0 and not output
     assert _run(capsys, tmp_path, "memory", "purge", uri, "--json")[0] == 0
     code, output, _ = _run(capsys, tmp_path, "memory", "list", "--json")
     assert code == 0 and json.loads(output) == []
 
 
-def test_manual_memory_filters_and_user_scope(tmp_path, capsys):
+def test_manual_memory_filters_and_shared_tenant_scope(tmp_path, capsys):
     code, output, _ = _run(
         capsys,
         tmp_path,
@@ -186,7 +186,7 @@ def test_manual_memory_filters_and_user_scope(tmp_path, capsys):
             "--json",
         ]
     )
-    assert code == 0 and json.loads(capsys.readouterr().out) == []
+    assert code == 0 and json.loads(capsys.readouterr().out)[0]["uri"] == uri
     code = main(
         [
             "--store",

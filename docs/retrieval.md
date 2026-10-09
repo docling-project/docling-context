@@ -3,7 +3,7 @@
 `dc search` uses the local SQLite index and works without an embedding model:
 
 ```bash
-uv run dc search "glacier" --uri docling://resources/articles \
+uv run dc search "glacier" --project climate \
   --xpath '/doclang[1]/text[1]' -k 5 --max-tokens 1000
 ```
 
@@ -47,7 +47,7 @@ with LocalContextStore("./context-data") as store:
     result = Retriever(store).search(
         Principal("default", "local"),
         "glacier",
-        scope=SearchScope(uri="docling://resources/articles"),
+        scope=SearchScope(project_id="climate"),
         mode="lexical",
     )
 ```
@@ -119,7 +119,7 @@ an existing store, create a JSON list such as:
 [
   {
     "query": "Koonap formation in the Karoo Basin",
-    "relevant_uris": ["docling://resources/documents/example-paper"]
+    "relevant_uris": ["docling://resources/library/example-paper"]
   }
 ]
 ```

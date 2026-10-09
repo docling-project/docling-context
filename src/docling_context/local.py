@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 from typing import Self
 
 from .models import (
@@ -61,7 +62,11 @@ class LocalContextStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
+        self._transaction_lock = RLock()
         self._migrate()
+        from .catalog import Catalog
+
+        Catalog(self).setup()
         if reconcile_on_start:
             self.reconcile()
 
@@ -76,7 +81,7 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 8:
+        if version > 9:
             raise RuntimeError("database schema is newer than this library")
         if version == 0:
             self.db.executescript(
@@ -300,6 +305,17 @@ class LocalContextStore:
                 COMMIT;
                 """
             )
+        if version < 9:
+            with self.transaction():
+                columns = {
+                    row["name"]
+                    for row in self.db.execute("PRAGMA table_info(ingest_jobs)")
+                }
+                if "project_id" not in columns:
+                    self.db.execute(
+                        "ALTER TABLE ingest_jobs ADD COLUMN project_id TEXT"
+                    )
+                self.db.execute("PRAGMA user_version = 9")
         self._backfill_retrieval()
 
     def _backfill_retrieval(self) -> None:
@@ -402,6 +418,14 @@ class LocalContextStore:
         self, principal: Principal, uri: str, revision_id: str, event: int, now: str
     ) -> None:
         address = parse_uri(uri)
+        if address.namespace == "resources" and address.segments[0] in {
+            "library",
+            "memories",
+            "skills",
+            "concepts",
+            "knowledge",
+        }:
+            return
         if address.namespace != "resources" or address.segments[1:] == (
             "_context",
             "summary",
@@ -432,14 +456,21 @@ class LocalContextStore:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield self.db
-            self.db.execute("COMMIT")
-        except BaseException:
-            if self.db.in_transaction:
-                self.db.execute("ROLLBACK")
-            raise
+        with self._transaction_lock:
+            nested = self.db.in_transaction
+            savepoint = f"dc_{uuid.uuid4().hex}" if nested else ""
+            self.db.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
+            try:
+                yield self.db
+                self.db.execute(f"RELEASE {savepoint}" if nested else "COMMIT")
+            except BaseException:
+                if self.db.in_transaction:
+                    if nested:
+                        self.db.execute(f"ROLLBACK TO {savepoint}")
+                        self.db.execute(f"RELEASE {savepoint}")
+                    else:
+                        self.db.execute("ROLLBACK")
+                raise
 
     @staticmethod
     def _record(row: sqlite3.Row) -> DocumentRecord:
@@ -488,7 +519,14 @@ class LocalContextStore:
             if current is None:
                 if expected_revision is not None:
                     raise RevisionConflict("document does not exist")
-                document_id = uuid.uuid4().hex
+                document_id = (
+                    address.segments[1]
+                    if address.namespace == "resources"
+                    and len(address.segments) == 2
+                    and address.segments[0]
+                    in {"library", "memories", "skills", "concepts", "knowledge"}
+                    else uuid.uuid4().hex
+                )
                 created_at = now
             else:
                 if current["revision_id"] != expected_revision:
@@ -605,6 +643,16 @@ class LocalContextStore:
             self._verified_record(current)
             if current["revision_id"] != expected_revision:
                 raise RevisionConflict("revision changed")
+            if address.namespace == "resources" and len(address.segments) == 2:
+                if address.segments[0] == "knowledge":
+                    self.db.execute(
+                        "DELETE FROM dc_knowledge_datasets WHERE tenant_id=? AND knowledge_id=?",
+                        (principal.tenant_id, address.segments[1]),
+                    )
+                self.db.execute(
+                    "DELETE FROM dc_resources WHERE tenant_id=? AND uri=?",
+                    (principal.tenant_id, address.value),
+                )
             self.db.execute(
                 "DELETE FROM documents WHERE tenant_id=? AND uri=?",
                 (principal.tenant_id, address.value),

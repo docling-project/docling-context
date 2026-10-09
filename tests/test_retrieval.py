@@ -307,7 +307,7 @@ def test_index_status_and_rebuild_restore_search_records(tmp_path, capsys):
     assert "Indexed documents" in capsys.readouterr().out
     assert main([*command, "index", "lex", "status", "--json"]) == 0
     assert "embedded_nodes" not in json.loads(capsys.readouterr().out)
-    assert main([*command, "index", "lex", "rebuild"]) == 0
+    assert main([*command, "index", "lex", "rebuild", "--json"]) == 0
     rebuilt = json.loads(capsys.readouterr().out)
     assert rebuilt["rebuilt_documents"] == 1
     assert rebuilt["indexed_nodes"] >= 1
@@ -496,7 +496,7 @@ def test_existing_retrieval_index_adds_picture_column_on_upgrade(tmp_path):
             "ALTER TABLE retrieval_units DROP COLUMN asset_path; PRAGMA user_version=4;"
         )
     with LocalContextStore(tmp_path) as store:
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 9
         assert "asset_path" in {
             row["name"]
             for row in store.db.execute("PRAGMA table_info(retrieval_units)")
@@ -698,7 +698,10 @@ def test_cli_vector_rebuild_search_and_scope_guard(tmp_path, capsys, monkeypatch
         lambda *_args, **_kwargs: WordVectors(),
     )
     command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
-    assert main([*command, "index", "vector", "rebuild", "--backend", "onnx"]) == 0
+    assert (
+        main([*command, "index", "vector", "rebuild", "--backend", "onnx", "--json"])
+        == 0
+    )
     assert selected_backends == ["onnx"]
     assert json.loads(capsys.readouterr().out)["embedded_nodes"] > 0
     assert main([*command, "index", "vector", "status"]) == 0

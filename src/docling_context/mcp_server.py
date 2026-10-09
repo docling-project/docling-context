@@ -38,6 +38,38 @@ def create_mcp(
     )
 
     @server.tool()
+    def overview(limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        """List projects and counts of their linked resources."""
+        return call_service(service, "overview", {"limit": limit, "offset": offset})
+
+    @server.tool()
+    def project_show(project_id: str) -> dict[str, Any]:
+        """Show one project and its context document URIs."""
+        return call_service(service, "project_show", {"project_id": project_id})
+
+    @server.tool()
+    def project_resources(project_id: str) -> dict[str, Any]:
+        """List resources linked to a project."""
+        return call_service(service, "project_resources", {"project_id": project_id})
+
+    @server.tool()
+    def resource_links(uri: str) -> dict[str, Any]:
+        """List typed links involving a resource."""
+        return call_service(service, "resource_links", {"uri": uri})
+
+    @server.tool()
+    def resource_projects(uri: str) -> dict[str, Any]:
+        """List projects linked to a shared resource."""
+        return call_service(service, "resource_projects", {"uri": uri})
+
+    @server.tool()
+    def knowledge_facts(knowledge_uri: str) -> dict[str, Any]:
+        """List cited facts in a structured knowledge dataset."""
+        return call_service(
+            service, "knowledge_facts", {"knowledge_uri": knowledge_uri}
+        )
+
+    @server.tool()
     def list_resources(
         uri: str = "docling://resources", limit: int = 100
     ) -> dict[str, Any]:
@@ -94,6 +126,7 @@ def create_mcp(
         per_result_tokens: int = 500,
         include_context: bool = False,
         image_base64: str | None = None,
+        project_id: str | None = None,
     ) -> dict[str, Any]:
         """Search indexed DocLang nodes with exact URI, revision, and XPath citations."""
         return call_service(
@@ -111,21 +144,82 @@ def create_mcp(
                 "per_result_tokens": per_result_tokens,
                 "include_context": include_context,
                 "image_base64": image_base64,
+                "project_id": project_id,
             },
         )
 
     @server.tool()
     def job_status(job_id: str) -> dict[str, Any]:
-        """Inspect a background collection job."""
+        """Inspect a durable ingestion job."""
         return call_service(service, "job_status", {"job_id": job_id})
 
     if allow_writes:
 
         @server.tool()
-        def ingest(
-            uri: str, filename: str, data_base64: str, force: bool = False
+        def project_create(project_id: str, title: str) -> dict[str, Any]:
+            """Create a project in the shared SQLite catalog."""
+            return call_service(
+                service, "project_create", {"project_id": project_id, "title": title}
+            )
+
+        @server.tool()
+        def project_link(project_id: str, uri: str) -> dict[str, Any]:
+            """Link a shared resource to a project."""
+            return call_service(
+                service, "project_link", {"project_id": project_id, "uri": uri}
+            )
+
+        @server.tool()
+        def project_unlink(project_id: str, uri: str) -> dict[str, Any]:
+            """Remove a shared resource from a project."""
+            return call_service(
+                service, "project_unlink", {"project_id": project_id, "uri": uri}
+            )
+
+        @server.tool()
+        def project_session_start(project_id: str, session_id: str) -> dict[str, Any]:
+            """Start a session owned by a project."""
+            return call_service(service, "project_session_start", locals())
+
+        @server.tool()
+        def project_session_close(project_id: str, session_id: str) -> dict[str, Any]:
+            """Close a project session and queue memory compilation."""
+            return call_service(service, "project_session_close", locals())
+
+        @server.tool()
+        def resource_link(
+            source_uri: str,
+            target_uri: str,
+            relation: str,
+            source_revision: str | None = None,
+            source_xpath: str | None = None,
         ) -> dict[str, Any]:
-            """Import bounded base64 document bytes into an authorized resource URI."""
+            """Record a typed relationship between two shared resources."""
+            return call_service(service, "resource_link", locals())
+
+        @server.tool()
+        def knowledge_add_fact(
+            knowledge_uri: str,
+            entity_type: str,
+            entity_id: str,
+            property: str,
+            value: Any,
+            source_uri: str,
+            source_revision: str,
+            source_xpath: str,
+        ) -> dict[str, Any]:
+            """Store a typed fact with an exact source citation."""
+            return call_service(service, "knowledge_add_fact", locals())
+
+        @server.tool()
+        def ingest(
+            filename: str,
+            data_base64: str,
+            uri: str = "",
+            project_id: str | None = None,
+            force: bool = False,
+        ) -> dict[str, Any]:
+            """Queue bounded source bytes for the shared library, optionally linked to a project."""
             return call_service(
                 service,
                 "ingest",
@@ -134,6 +228,7 @@ def create_mcp(
                     "filename": filename,
                     "data_base64": data_base64,
                     "force": force,
+                    "project_id": project_id,
                 },
             )
 
@@ -226,6 +321,13 @@ def authenticated_http_app(
         try:
             if not allow_writes and request.path_params["name"] in {
                 "ingest",
+                "project_create",
+                "project_link",
+                "project_unlink",
+                "project_session_start",
+                "project_session_close",
+                "resource_link",
+                "knowledge_add_fact",
                 "session_append",
                 "memory_list",
                 "memory_review",

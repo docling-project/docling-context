@@ -137,17 +137,19 @@ def test_compilation_review_correction_recall_and_source_cascade(tmp_path):
         )
         assert compiler.run_once().status == "completed"
         assert store.db.execute("SELECT count(*) FROM memory_index").fetchone()[0] == 1
-        for principal in (bob, other):
-            with pytest.raises(PermissionError):
-                memories.get(principal, uri)
-            with pytest.raises(PermissionError):
-                memories.accept(principal, uri)
-            with pytest.raises(PermissionError):
-                memories.correct(principal, uri, "wrong")
-            assert memories.search(principal, "Koonap") == ()
-            assert memories.list(principal, status="accepted") == ()
-            with pytest.raises(PermissionError):
-                compiler.jobs(principal, sessions.uri(alice, "chat"))
+        assert memories.get(bob, uri).uri == uri
+        assert memories.search(bob, "Koonap")[0].uri == uri
+        assert memories.list(bob, status="accepted")[0].uri == uri
+        with pytest.raises(PermissionError):
+            memories.accept(bob, uri)
+        with pytest.raises(PermissionError):
+            memories.correct(bob, uri, "wrong")
+        with pytest.raises((KeyError, PermissionError)):
+            memories.get(other, uri)
+        assert memories.search(other, "Koonap") == ()
+        assert memories.list(other, status="accepted") == ()
+        with pytest.raises(PermissionError):
+            compiler.jobs(bob, sessions.uri(alice, "chat"))
         sessions.delete(alice, "chat")
         assert memories.get(alice, uri).status == "proposed"
         assert memories.search(alice, "Koonap") == ()

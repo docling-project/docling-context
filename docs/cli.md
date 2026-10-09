@@ -1,33 +1,46 @@
 # `dc` CLI
 
 Install the package to expose `dc`. For PDF input, install the `conversion`
-extra. The command uses a local store at `~/.local/share/docling-context` by
-default; pass `--store PATH` to choose another directory. `--tenant` and
-`--user` select the principal; their defaults are `default` and `local`.
-Use `uv run dc` or activate the project environment; a system calculator also
-uses the name `dc` on some machines.
+extra. Run `dc init` to create the local SQLite catalog and package directory.
+The store defaults to `~/.local/share/docling-context`;
+pass `--store PATH` to choose another directory. `--tenant` and `--user`
+select the principal, defaulting to `default` and `local`. Use `uv run dc` or
+activate the environment; some systems also have a calculator named `dc`.
 
 ```bash
+export DOCLING_CONTEXT_STORE=./context-data
+uv run dc init
+uv run dc project create papers --title "Paper review"
 uv run --extra conversion dc --store ./context-data add-resource ./paper.pdf \
-  --collection papers --no-ocr --tables --no-charts
-uv run dc --store ./context-data task status JOB_ID
-uv run dc --store ./context-data jobs status JOB_ID --json
-uv run dc --store ./context-data worker --once
+  --project papers --no-ocr --tables --no-charts
+uv run dc overview
+uv run dc project resources papers
+uv run dc resource projects docling://resources/library/DOC_ID
+uv run dc search "invoice" --project papers
+uv run dc project link papers docling://resources/library/DOC_ID
+uv run dc project unlink papers docling://resources/library/DOC_ID
+uv run dc resource add skills ./method.dclx --project papers
+uv run dc resource link docling://resources/library/DOC_ID \
+  docling://resources/skills/SKILL_ID --relation uses-method
+uv run dc resource links docling://resources/library/DOC_ID
+uv run dc project set-description papers ./description.dclx
+uv run dc project worker
+uv run dc project jobs papers
+uv run dc project session-start papers --id review-1
+uv run dc project session-append papers review-1 "Read section 2" --kind turn --key turn-1
+uv run dc project session-close papers review-1
 uv run dc --store ./context-data status
 uv run dc --store ./context-data index status
 uv run dc --store ./context-data index lex status
 uv run dc --store ./context-data index lex rebuild
 uv run --extra vectors dc --store ./context-data index vector status
 uv run --extra vectors dc --store ./context-data index vector rebuild
-uv run --extra vectors dc --store ./context-data search "invoice" --mode hybrid
+uv run --extra vectors dc --store ./context-data search "invoice" --project papers --mode hybrid
 uv run dc --store ./context-data ls docling://resources/
-uv run dc --store ./context-data tree docling://resources/papers -L 2
-uv run dc --store ./context-data outline docling://resources/papers/paper
-uv run dc --store ./context-data show docling://resources/papers/paper \
-  '/doclang[1]/text[1]' --format xml --json
-uv run dc --store ./context-data find "invoice" --uri docling://resources/papers
-uv run dc --store ./context-data grep "total" --uri docling://resources/papers
-uv run dc --store ./context-data search "invoice" --uri docling://resources/papers
+uv run dc --store ./context-data tree docling://resources/library -L 2
+uv run dc --store ./context-data outline docling://resources/library/DOC_ID
+uv run dc --store ./context-data show docling://resources/library/DOC_ID \
+  '/doclang[1]/text[1]' --format xml
 uv run dc --store ./context-data session start --id chat-1
 uv run dc --store ./context-data session list --status open
 uv run dc --store ./context-data memory list --status proposed
@@ -40,11 +53,11 @@ uv run docling-context doctor codex --scope project --store ./context-data
 PDF, DOCX, PPTX, XLSX, images, HTML, and plain text. Native DCLG and DCLX files
 also work without that extra. Folder imports scan the top level by default.
 Add `-r` or `--recursive` to include subfolders; those paths are retained in
-the URI. Use repeatable `--from FORMAT` options to select Docling format names,
+source provenance. Use repeatable `--from FORMAT` options to select Docling format names,
 such as `--from pdf --from docx --from image` (default: all). Filtering uses
-filename extensions; Docling then detects the actual input format. Files with
-the same stem and different extensions receive distinct URIs. A single file
-can use `--uri`; otherwise `--collection` defaults to `documents`. Use `--config`
+filename extensions; Docling then detects the actual input format. Every new
+source receives a flat library URI; an identical source binary reuses its URI.
+Use `--project ID` to link the import to a project. Use `--config`
 for a [JSON conversion config](conversion.md), with command flags overriding it.
 Use `--force` to create a new revision for unchanged input.
 Table reconstruction always uses accurate mode; there is no CLI mode switch.
@@ -52,26 +65,50 @@ Page and picture images are on by default, and there is no default page limit.
 `--no-page-images`, `--no-picture-images`, and `--max-pages N` override these
 defaults. OCR uses RapidOCR with English PP-OCRv6 `tiny` models when enabled.
 
-Ingestion is synchronous. Each new resource revision queues a collection-summary
-job; `add-resource` prints the revision and its `task_id`. `task status` reports
-that job. Run `worker --once` for one due job, or `worker` continuously. A
-collection summary may remain stale until its latest job completes.
+Ingestion is synchronous. `add-resource` prints its library URI, revision,
+source hash, and optional project ID. `dc overview` lists projects and counts their
+distinct linked resources; `--json`, `--limit`, and `--offset` are supported.
+`dc project set-abstract` and `set-overview` accept native DCLX or DCLG files.
+Project changes queue automatic abstract and overview refresh jobs; run
+`dc project worker` to process them.
+Project session commands store DCLX event packages under the project path and
+make the session count visible in `dc overview`. Closing one queues memory
+compilation; `dc memory worker --once` creates proposed shared memories.
+
+Skills, concepts, and knowledge are flat DCLX resources. `resource add` adds a
+typed metadata part to the package. Supply `--metadata FILE` to define it; for
+example, a knowledge descriptor can use:
+
+```json
+{"name":"Materials","summary":"Measured material properties","fields":{"density":"number","phase":"text"}}
+```
+
+After `dc resource add knowledge ./materials.dclg --metadata ./materials.json
+--project papers`, use `dc knowledge add-fact --help` to see the required
+entity, property, JSON value, and exact source citation arguments. `dc knowledge
+facts KNOWLEDGE_URI` lists stored facts. Concept metadata can define
+`entity_types`, `relationship_types`, and `properties`; skill metadata holds
+its name and summary. Use `dc resource link` for relationships between these
+resources and library documents.
 
 `outline URI` reads the TOC sidecar and `show URI XPATH` reads one cited node.
 Use `--revision ID` for an immutable revision, `--format xml` for DocLang XML,
-and `--max-chars N` to bound output. Both commands support `--json`; JSON
-includes the URI, document ID, revision ID, XPath, and truncation marker.
+and `--max-chars N` to bound output. Both commands show labeled tables by
+default; `--raw` prints only the XML or node content. Use `--json` for the full
+record, including URI, document ID, revision ID, XPath, and truncation marker.
 
 `docling-context` exposes the existing `dc` commands and adds `mcp`,
 `integrate`, `doctor`, `remove`, and `ingest-worker`. See the
 [agent harness guide](agents.md) for scopes, remote tokens, and verification.
 
-Every `status` command prints a table by default. Pass `--json` for structured
-output, for example `dc status --json`, `dc task status JOB_ID --json`, or
-`dc index vector status --json`.
+CLI commands print labeled tables by default. `dc tree` also has `--raw` for an
+indented URI view. Pass `--json` for structured output, for example
+`dc status --json`, `dc add-resource FILE --json`, or
+`dc project show ID --json`. Import, project-resource, resource-link, tree,
+`ls`, `find`, and `grep` commands emit one JSON object per row; other list
+commands emit a JSON array.
 The main `status` also shows session, memory, and memory compilation job counts
-for the selected user. List commands use tables by default and JSON arrays with
-`--json`. The session and memory lists support `--limit` and `--offset` pages;
+for the selected user. The session and memory lists support `--limit` and `--offset` pages;
 the default page size is 100 and the maximum is 1,000.
 
 ## Sessions and memory

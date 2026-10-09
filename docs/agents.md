@@ -2,12 +2,15 @@
 
 Install `docling-context` into a Python environment visible to the harness. The
 package exposes `dc` for document work and `docling-context` for MCP serving and
-harness integration. Local serving uses the same SQLite store and DCLX packages
-as `dc`; no cloud account is needed.
+harness integration. Use the same local SQLite store for the CLI, workers, and
+MCP server.
 
 ```bash
 uv sync --extra conversion
-uv run dc add-resource ./paper.pdf --collection papers
+export DOCLING_CONTEXT_STORE=./context-data
+uv run dc init
+uv run dc project create papers --title "Paper review"
+uv run dc add-resource ./paper.pdf --project papers
 uv run docling-context integrate codex --scope project
 uv run docling-context doctor codex --scope project
 ```
@@ -21,14 +24,42 @@ as conflicts. Repeating `integrate` is safe, and changing options upgrades only
 the owned entry. The installer writes a small ownership marker next to the
 config; keep it alongside the config for future upgrades and removal.
 
+## Install in each harness
+
+Run one of these pairs from the environment where `docling-context` is
+installed. The installer writes one named MCP entry and `doctor` verifies the
+connection. Use `--scope user` for a personal installation; Hermes currently
+supports only user scope. Add `--allow-writes` to `integrate` when the agent
+should ingest documents or write session and memory records.
+
+```bash
+uv run docling-context integrate codex --scope project
+uv run docling-context doctor codex --scope project
+
+uv run docling-context integrate claude --scope project
+uv run docling-context doctor claude --scope project
+
+uv run docling-context integrate hermes --scope user
+uv run docling-context doctor hermes --scope user
+
+uv run docling-context integrate pi --scope project
+uv run docling-context doctor pi --scope project
+```
+
+Restart the harness after installation. Ask it: “Use docling-context overview
+to list my projects, then search the papers project for the main findings and
+show the cited nodes.” The MCP `overview` and `search(project_id=...)` tools
+use the SQLite project catalog. The installer carries the selected `--store`
+path into the local MCP command.
+
 ## Harnesses
 
-| Harness | Local version observed | User config | Project config | Local stdio | Remote HTTP | Verification |
-| --- | --- | --- | --- | --- | --- | --- |
-| Codex | 0.160.0 | `~/.codex/config.toml` | `.codex/config.toml` | Yes | Yes | Config test, MCP handshake, CLI lists entry |
-| Claude Code | 2.1.278 | `~/.claude.json` | `.mcp.json` | Yes | Yes | Config test, MCP handshake, CLI sees entry pending project approval |
-| Hermes Agent | 0.21.1 | `~/.hermes/config.yaml` | Unsupported by Hermes | Yes | Yes | Config test, MCP handshake, CLI lists entry |
-| Pi | Not installed locally | `~/.pi/agent/mcp.json` | `.pi/mcp.json` | Yes | Yes | Config test and MCP SDK handshake; native CLI unverified |
+| Harness | User config | Project config | Local stdio | Remote HTTP |
+| --- | --- | --- | --- | --- |
+| Codex | `~/.codex/config.toml` | `.codex/config.toml` | Yes | Yes |
+| Claude Code | `~/.claude.json` | `.mcp.json` | Yes | Yes |
+| Hermes Agent | `~/.hermes/config.yaml` | Unsupported by this installer | Yes | Yes |
+| Pi | `~/.pi/agent/mcp.json` | `.pi/mcp.json` | Yes | Yes |
 
 The config tests check preservation, repeat installs, upgrades, and removal. The
 MCP handshake is tested with the Python MCP client; harness binaries are not
@@ -69,12 +100,16 @@ silently skips the image contribution.
 
 Read tools are on by default. Local write tools require `--allow-writes` on
 `integrate` or `docling-context mcp`; write tools include `ingest`,
+`project_create`, `project_link`, `project_session_start`,
+`project_session_close`, `resource_link`, `knowledge_add_fact`,
 `session_append`, and `memory_review`. Memory capture remains opt-in. Each
 operation checks the principal's tenant and user scope. The current local
 principal comes from the server command, not from tool arguments.
 
-MCP `ingest` accepts base64 source bytes up to 2.5 MB and returns a durable job
-ID. Run `docling-context ingest-worker` alongside the agent, or
+MCP `ingest` accepts a filename and base64 source bytes up to 2.5 MB, with an
+optional `project_id`, and returns a durable job ID. The worker checks the
+source hash, stores the DCLX in the flat library, and links it to the project
+when requested. Run `docling-context ingest-worker` alongside the agent, or
 `docling-context ingest-worker --once` for one job. `job_status` reports queued,
 running, completed, or failed state and the resulting revision. Jobs survive
 server and worker restarts. Larger documents can be imported with `dc
@@ -112,7 +147,7 @@ from docling_context import ContextService, LocalContextStore, Principal, Search
 
 with LocalContextStore("./context-data") as store:
     service = ContextService(store, Principal("team", "agent"))
-    hits = service.search(SearchRequest("Koonap", uri="docling://resources/papers"))
+    hits = service.search(SearchRequest("Koonap", project_id="papers"))
     for hit in hits.data["hits"]:
         print(hit["uri"], hit["revision_id"], hit["xpath"])
 ```

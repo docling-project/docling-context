@@ -1,5 +1,14 @@
 # Agent sessions
 
+Project-owned sessions use
+`docling://projects/{project_id}/sessions/{session_id}`. The CLI currently
+supports `dc project session-start`, `session-append`, `session-show`,
+`session-close`, and `session-list`. They contribute to the sessions column in
+`dc overview`. Closing one queues compilation of shared memory proposals;
+run `dc memory worker --once` to process the queue.
+
+The user-scoped session workflow below remains available for private sessions.
+
 `SessionStore` appends agent turns, tool calls, tool results, and feedback to a
 revisioned DCLX package at
 `docling://users/{tenant}/{user}/sessions/{session_id}`. Each event is a DocLang

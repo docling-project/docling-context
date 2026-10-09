@@ -50,10 +50,10 @@ def parse_uri(value: str, *, prefix: bool = False) -> ContextURI:
         raise InvalidURI("URI contains a query, fragment, backslash, or invalid escape")
     rest = value[len("docling://") :]
     namespace, separator, path = rest.partition("/")
-    if namespace not in {"resources", "users"} or (
-        not separator and not (prefix and namespace == "resources")
+    if namespace not in {"resources", "users", "projects", "user"} or (
+        not separator and not prefix
     ):
-        raise InvalidURI("URI namespace must be resources or users")
+        raise InvalidURI("URI namespace must be resources, projects, user, or users")
     raw_segments = path.split("/") if separator else []
     segments = []
     for raw in raw_segments:
@@ -73,9 +73,9 @@ def parse_uri(value: str, *, prefix: bool = False) -> ContextURI:
             raise InvalidURI("URI contains a control character")
         segments.append(segment)
     minimum = (
-        (0 if namespace == "resources" else 2)
+        (2 if namespace == "users" else 0)
         if prefix
-        else (2 if namespace == "resources" else 4)
+        else (4 if namespace == "users" else 2 if namespace == "resources" else 1)
     )
     if len(segments) < minimum:
         raise InvalidURI("URI is too short for its namespace")
@@ -85,6 +85,24 @@ def parse_uri(value: str, *, prefix: bool = False) -> ContextURI:
         and segments[2] not in {"memories", "sessions", "skills"}
     ):
         raise InvalidURI("user URI must contain memories, sessions, or skills")
+    if (
+        namespace == "resources"
+        and segments
+        and segments[0] in {"library", "memories", "skills", "concepts", "knowledge"}
+        and not prefix
+        and len(segments) != 2
+    ):
+        raise InvalidURI("shared resource URI must have one ID")
+    if (
+        namespace == "projects"
+        and len(segments) > 1
+        and (len(segments) != 3 or segments[1] != "sessions")
+        and not (
+            len(segments) == 2
+            and segments[1] in {".abstract.dclx", ".overview.dclx", ".description.dclx"}
+        )
+    ):
+        raise InvalidURI("invalid project path")
     return ContextURI(namespace, tuple(segments))
 
 
@@ -95,3 +113,9 @@ def authorize_uri(principal: Principal, uri: ContextURI) -> None:
             raise AccessDenied("tenant does not match")
         if len(uri.segments) < 2 or uri.segments[1] != principal.user_id:
             raise AccessDenied("user does not match")
+    if (
+        uri.namespace == "user"
+        and uri.segments
+        and uri.segments[0] != principal.user_id
+    ):
+        raise AccessDenied("user does not match")

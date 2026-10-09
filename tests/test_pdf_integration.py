@@ -16,7 +16,24 @@ from docling_context import (
     PdfConversionConfig,
     Principal,
 )
+from docling_context.catalog import Catalog
 from docling_context.cli import main
+
+
+def _native_conversion_available() -> bool:
+    if sys.platform != "darwin":
+        return True
+    try:
+        import torch
+    except ImportError:
+        return False
+    return bool(torch.backends.mps.is_available())
+
+
+native_conversion = pytest.mark.skipif(
+    not _native_conversion_available(),
+    reason="native Docling layout conversion requires Metal in this macOS environment",
+)
 
 
 def _one_page_pdf() -> bytes:
@@ -47,6 +64,7 @@ def _one_page_pdf() -> bytes:
     return bytes(output)
 
 
+@native_conversion
 def test_local_pdf_to_valid_dclx(tmp_path):
     pytest.importorskip("docling")
     with LocalContextStore(tmp_path) as store:
@@ -58,7 +76,7 @@ def test_local_pdf_to_valid_dclx(tmp_path):
         )
         record = Ingestor(store, converter=LocalDoclingConverter(config)).add_resource(
             Principal("tenant", "alice"),
-            "docling://resources/papers/hello",
+            "docling://resources/library/hello",
             _one_page_pdf(),
             filename="hello.pdf",
         )
@@ -71,8 +89,10 @@ def test_local_pdf_to_valid_dclx(tmp_path):
         assert record.source["converter_options"]["do_table_structure"] is False
 
 
+@native_conversion
 def test_cli_imports_nested_pdf_folder(tmp_path, capsys):
     pytest.importorskip("docling")
+    tenant = "test"
     folder = tmp_path / "papers"
     (folder / "year").mkdir(parents=True)
     (folder / "first.pdf").write_bytes(_one_page_pdf())
@@ -80,29 +100,37 @@ def test_cli_imports_nested_pdf_folder(tmp_path, capsys):
     config = tmp_path / "config.json"
     config.write_text('{"do_ocr": false, "do_table_structure": false}')
     store = tmp_path / "store"
-    assert (
-        main(
-            [
-                "--store",
-                str(store),
-                "add-resource",
-                str(folder),
-                "--collection",
-                "papers",
-                "-r",
-                "--config",
-                str(config),
-            ]
+    with LocalContextStore(store) as local:
+        catalog = Catalog(local)
+        base = ["--store", str(store), "--tenant", tenant]
+        assert main([*base, "project", "create", "papers", "--title", "Papers"]) == 0
+        capsys.readouterr()
+        assert (
+            main(
+                [
+                    *base,
+                    "add-resource",
+                    str(folder),
+                    "--project",
+                    "papers",
+                    "-r",
+                    "--config",
+                    str(config),
+                    "--json",
+                ]
+            )
+            == 0
         )
-        == 0
-    )
-    uris = {json.loads(line)["uri"] for line in capsys.readouterr().out.splitlines()}
-    assert uris == {
-        "docling://resources/papers/first",
-        "docling://resources/papers/year/second",
-    }
+        uris = {
+            json.loads(line)["uri"] for line in capsys.readouterr().out.splitlines()
+        }
+        # Both PDF files contain identical binary bytes and share one library item.
+        assert len(uris) == 1
+        assert next(iter(uris)).startswith("docling://resources/library/")
+        assert catalog.overview(Principal(tenant, "local"))[0]["documents"] == 1
 
 
+@native_conversion
 def test_local_office_and_image_formats_to_valid_dclx(tmp_path):
     pytest.importorskip("docling")
     word = pytest.importorskip("docx")
@@ -138,7 +166,7 @@ def test_local_office_and_image_formats_to_valid_dclx(tmp_path):
             converter=LocalDoclingConverter(PdfConversionConfig(do_ocr=False)),
         )
         for path in (word_path, slides_path, workbook_path, image_path):
-            uri = f"docling://resources/documents/{path.stem}"
+            uri = f"docling://resources/library/{path.stem}"
             record = ingestor.add_resource(Principal("tenant", "alice"), uri, path)
             assert record.source["converter"] == "docling-local"
             package = store.get_document(Principal("tenant", "alice"), uri)
