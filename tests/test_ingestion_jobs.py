@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
-from doclang import DocLangXDocument
+from doclang import DoclangDocument, DocLangXDocument, DocLangXDocumentRole
 
 from docling_context import (
     CollectionWorker,
@@ -22,6 +22,8 @@ from docling_context import (
     Principal,
     RecordMissing,
 )
+from docling_context.doclang_authoring import get_outline, get_summary
+from docling_context.package import PackageError
 
 PRINCIPAL = Principal("tenant-a", "alice")
 COLLECTION = "docling://resources/articles"
@@ -32,8 +34,9 @@ def dclx() -> bytes:
     doc = DocLangXDocument()
     assert doc.read_xml("<doclang><heading>First</heading><text>Body</text></doclang>")
     doc.set_part_bytes("assets/source.bin", b"asset", "application/octet-stream")
-    assert doc.set_concepts(
-        "<doclang><concepts><concept><header>Topic</header></concept></concepts></doclang>"
+    assert doc.set(
+        DocLangXDocumentRole.CONCEPTS,
+        DoclangDocument("<doclang><heading>Topic</heading></doclang>"),
     )
     return doc.write_bytes()
 
@@ -46,13 +49,14 @@ def test_native_import_tiers_assets_and_idempotence(tmp_path):
         assert first.source["origin_uri"].startswith("sha256:")
         package = store.get_document(PRINCIPAL, URI)
         assert package.at(xpath="/doclang[1]/text[1]") == "Body"
-        assert "First" in package.summary().xml()
-        assert (
-            package.toc().at(xpath="/doclang[1]/toc[1]/entry[1]/description[1]")
-            == "First"
-        )
+        summary = get_summary(package)
+        assert summary is not None
+        assert "First" in summary.xml()
+        assert summary.validate(allow_empty_namespace=True).ok()
+        assert get_outline(package).at(xpath="/doclang[1]/heading[1]") == "First"
         assert package.get_part_bytes("assets/source.bin") == b"asset"
-        assert "Topic" in package.concepts().xml()
+        concepts = package.get(DocLangXDocumentRole.CONCEPTS)
+        assert concepts is not None and "Topic" in concepts.xml()
         manifest = json.loads(package.get_part_text("context/manifest.json"))
         assert manifest["schema_version"] == 1
         assert manifest["source_revision"] == first.revision_id
@@ -69,6 +73,19 @@ def test_native_import_tiers_assets_and_idempotence(tmp_path):
             PRINCIPAL, URI, original, filename="one.dclx", force=True
         )
         assert forced.revision_id != first.revision_id
+
+
+def test_native_dclg_rejects_xml_outside_doclang_schema(tmp_path):
+    with (
+        LocalContextStore(tmp_path) as store,
+        pytest.raises(PackageError, match="invalid DCLG source"),
+    ):
+        Ingestor(store).add_resource(
+            PRINCIPAL,
+            URI,
+            b"<doclang><toc><entry>Unvalidated</entry></toc></doclang>",
+            filename="invalid.dclg",
+        )
 
 
 def test_ingestor_uses_store_contract_with_in_memory_backend():
@@ -153,9 +170,9 @@ def test_pdf_converter_contract_and_model_fallback(tmp_path):
         )
         assert record.source["converter"] == "test-pdf"
         assert record.source["summary_method"] == "extractive-fallback"
-        assert (
-            store.get_document(PRINCIPAL, URI).summary().at(xpath="/doclang[1]/text[1]")
-        )
+        summary = get_summary(store.get_document(PRINCIPAL, URI))
+        assert summary is not None
+        assert summary.at(xpath="/doclang[1]/text[1]")
 
 
 def test_model_summary_is_tied_to_committed_revision(tmp_path):
@@ -166,7 +183,9 @@ def test_model_summary_is_tied_to_committed_revision(tmp_path):
         )
         package = store.get_document(PRINCIPAL, URI)
         assert provider.seen_revision == record.revision_id
-        assert package.summary().at(xpath="/doclang[1]/text[1]") == "Model summary"
+        summary = get_summary(package)
+        assert summary is not None
+        assert summary.at(xpath="/doclang[1]/text[1]") == "Model summary"
 
 
 def test_nested_heading_outline(tmp_path):
@@ -176,11 +195,9 @@ def test_nested_heading_outline(tmp_path):
     )
     with LocalContextStore(tmp_path) as store:
         Ingestor(store).add_resource(PRINCIPAL, URI, source, filename="one.dclg")
-        toc = store.get_document(PRINCIPAL, URI).toc()
-        assert (
-            toc.at(xpath="/doclang[1]/toc[1]/entry[1]/entry[1]/description[1]")
-            == "Section"
-        )
+        toc = get_outline(store.get_document(PRINCIPAL, URI))
+        assert toc.at(xpath="/doclang[1]/heading[2]") == "Section"
+        assert toc.validate(allow_empty_namespace=True).ok()
 
 
 def test_remote_adapter_uses_zip_target_and_bounded_package(monkeypatch):
@@ -292,5 +309,5 @@ def test_existing_database_upgrades_without_losing_documents(tmp_path):
         )
     with LocalContextStore(tmp_path) as store:
         assert store.get_record(PRINCIPAL, URI).revision_id == original.revision_id
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 10
         assert len(CollectionWorker(store).jobs(PRINCIPAL, COLLECTION)) == 1

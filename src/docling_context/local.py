@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 from typing import Self
 
 from .models import (
@@ -61,7 +62,11 @@ class LocalContextStore:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
+        self._transaction_lock = RLock()
         self._migrate()
+        from .catalog import Catalog
+
+        Catalog(self).setup()
         if reconcile_on_start:
             self.reconcile()
 
@@ -76,7 +81,7 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 8:
+        if version > 10:
             raise RuntimeError("database schema is newer than this library")
         if version == 0:
             self.db.executescript(
@@ -300,22 +305,57 @@ class LocalContextStore:
                 COMMIT;
                 """
             )
-        self._backfill_retrieval()
+        if version < 9:
+            with self.transaction():
+                columns = {
+                    row["name"]
+                    for row in self.db.execute("PRAGMA table_info(ingest_jobs)")
+                }
+                if "project_id" not in columns:
+                    self.db.execute(
+                        "ALTER TABLE ingest_jobs ADD COLUMN project_id TEXT"
+                    )
+                self.db.execute("PRAGMA user_version = 9")
+        if version < 10:
+            with self.transaction():
+                self.db.execute(
+                    """CREATE TABLE IF NOT EXISTS lexical_state (
+                         tenant_id TEXT NOT NULL, uri TEXT NOT NULL,
+                         revision_id TEXT NOT NULL, unit_count INTEGER NOT NULL,
+                         PRIMARY KEY (tenant_id, uri),
+                         FOREIGN KEY (tenant_id, uri)
+                           REFERENCES documents (tenant_id, uri) ON DELETE CASCADE)"""
+                )
+                self.db.execute("PRAGMA user_version = 10")
 
-    def _backfill_retrieval(self) -> None:
+    def lexical_stale_uris(self, principal: Principal) -> tuple[str, ...]:
+        """Find visible documents whose current lexical projection is incomplete."""
         rows = self.db.execute(
-            """SELECT d.* FROM documents d WHERE d.available=1 AND NOT EXISTS (
-                 SELECT 1 FROM retrieval_units r WHERE r.tenant_id=d.tenant_id
-                 AND r.uri=d.uri AND r.revision_id=d.revision_id)"""
+            """SELECT d.uri FROM documents d LEFT JOIN lexical_state s
+                 ON s.tenant_id=d.tenant_id AND s.uri=d.uri
+               WHERE d.tenant_id=? AND d.available=1 AND (
+                 s.revision_id IS NULL OR s.revision_id!=d.revision_id
+                 OR s.unit_count!=(SELECT COUNT(*) FROM retrieval_units r
+                   WHERE r.tenant_id=d.tenant_id AND r.uri=d.uri
+                     AND r.revision_id=d.revision_id)
+                 OR EXISTS (SELECT 1 FROM retrieval_units r
+                   WHERE r.tenant_id=d.tenant_id AND r.uri=d.uri
+                     AND r.revision_id=d.revision_id
+                     AND NOT EXISTS (SELECT 1 FROM retrieval_fts
+                       WHERE rowid=r.vector_id)))""",
+            (principal.tenant_id,),
         ).fetchall()
-        for row in rows:
-            try:
-                package = self.packages.get(row["package_hash"])
-                with self.transaction():
-                    index_package(self.db, self._record(row), package)
-                    self.db.execute("UPDATE vector_state SET outbox_offset=-1")
-            except (PackageMissing, PackageError):
-                continue
+        return tuple(
+            row["uri"] for row in rows if self._can_access(principal, row["uri"])
+        )
+
+    def lexical_warning(self, principal: Principal) -> str | None:
+        if self.lexical_stale_uris(principal):
+            return (
+                "Lexical index is incomplete or stale. "
+                "Run 'dc index lex rebuild' to rebuild it."
+            )
+        return None
 
     def index_status(self, principal: Principal) -> dict[str, int | str | None]:
         """Report the current, authorized retrieval projection."""
@@ -324,6 +364,7 @@ class LocalContextStore:
             (principal.tenant_id,),
         ).fetchall()
         visible = [row for row in rows if self._can_access(principal, row["uri"])]
+        stale = set(self.lexical_stale_uris(principal))
         indexed = units = embedded = 0
         for row in visible:
             count, with_embeddings = self.db.execute(
@@ -331,7 +372,7 @@ class LocalContextStore:
                    WHERE tenant_id=? AND uri=? AND revision_id=?""",
                 (principal.tenant_id, row["uri"], row["revision_id"]),
             ).fetchone()
-            indexed += count > 0
+            indexed += row["uri"] not in stale
             units += count
             embedded += with_embeddings
         state = self.db.execute(
@@ -340,13 +381,24 @@ class LocalContextStore:
         offset = self.db.execute(
             "SELECT COALESCE(MAX(sequence),0) FROM outbox"
         ).fetchone()[0]
+        snapshot_valid = False
+        if state is not None:
+            from .vectors import VectorStorageUnavailable, verified_vector_state
+
+            try:
+                verified_vector_state(self)
+                snapshot_valid = True
+            except VectorStorageUnavailable:
+                pass
         return {
             "documents": len(visible),
             "indexed_documents": indexed,
             "indexed_nodes": units,
             "embedded_nodes": embedded,
             "vector_model": state["model_id"] if state else None,
-            "vector_snapshot_current": bool(state and state["outbox_offset"] == offset),
+            "vector_snapshot_current": bool(
+                snapshot_valid and state and state["outbox_offset"] == offset
+            ),
         }
 
     def rebuild_index(
@@ -402,6 +454,14 @@ class LocalContextStore:
         self, principal: Principal, uri: str, revision_id: str, event: int, now: str
     ) -> None:
         address = parse_uri(uri)
+        if address.namespace == "resources" and address.segments[0] in {
+            "library",
+            "memories",
+            "skills",
+            "concepts",
+            "knowledge",
+        }:
+            return
         if address.namespace != "resources" or address.segments[1:] == (
             "_context",
             "summary",
@@ -432,14 +492,21 @@ class LocalContextStore:
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            yield self.db
-            self.db.execute("COMMIT")
-        except BaseException:
-            if self.db.in_transaction:
-                self.db.execute("ROLLBACK")
-            raise
+        with self._transaction_lock:
+            nested = self.db.in_transaction
+            savepoint = f"dc_{uuid.uuid4().hex}" if nested else ""
+            self.db.execute(f"SAVEPOINT {savepoint}" if nested else "BEGIN IMMEDIATE")
+            try:
+                yield self.db
+                self.db.execute(f"RELEASE {savepoint}" if nested else "COMMIT")
+            except BaseException:
+                if self.db.in_transaction:
+                    if nested:
+                        self.db.execute(f"ROLLBACK TO {savepoint}")
+                        self.db.execute(f"RELEASE {savepoint}")
+                    else:
+                        self.db.execute("ROLLBACK")
+                raise
 
     @staticmethod
     def _record(row: sqlite3.Row) -> DocumentRecord:
@@ -488,7 +555,14 @@ class LocalContextStore:
             if current is None:
                 if expected_revision is not None:
                     raise RevisionConflict("document does not exist")
-                document_id = uuid.uuid4().hex
+                document_id = (
+                    address.segments[1]
+                    if address.namespace == "resources"
+                    and len(address.segments) == 2
+                    and address.segments[0]
+                    in {"library", "memories", "skills", "concepts", "knowledge"}
+                    else uuid.uuid4().hex
+                )
                 created_at = now
             else:
                 if current["revision_id"] != expected_revision:
@@ -605,6 +679,16 @@ class LocalContextStore:
             self._verified_record(current)
             if current["revision_id"] != expected_revision:
                 raise RevisionConflict("revision changed")
+            if address.namespace == "resources" and len(address.segments) == 2:
+                if address.segments[0] == "knowledge":
+                    self.db.execute(
+                        "DELETE FROM dc_knowledge_datasets WHERE tenant_id=? AND knowledge_id=?",
+                        (principal.tenant_id, address.segments[1]),
+                    )
+                self.db.execute(
+                    "DELETE FROM dc_resources WHERE tenant_id=? AND uri=?",
+                    (principal.tenant_id, address.value),
+                )
             self.db.execute(
                 "DELETE FROM documents WHERE tenant_id=? AND uri=?",
                 (principal.tenant_id, address.value),

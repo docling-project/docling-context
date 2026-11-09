@@ -30,7 +30,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-conversion = ["docling[rapidocr]>=2.134.0,<3"]
+conversion = [
+    "docling[rapidocr]>=2.138.0,<3",
+    "docling-parse>=7.22.3,<8",
+]
 vectors = [
     "numpy>=1.26",
     "turbovec>=1,<2",
@@ -47,7 +50,7 @@ docling-context = "docling_context.app:main"
 Repository = "https://github.com/docling-project/docling-context"
 
 [tool.uv.sources]
-doclang = { git = "https://github.com/doclang-project/doclang", rev = "92d299026f2f985328b52424483c711e19b2f306" }
+doclang = { git = "https://github.com/doclang-project/doclang", rev = "24b7ca6cc96e83af25ff9d67903e03c6d500c5e4" }
 
 [tool.docling-context.dependencies]
 doclang-license = "Apache-2.0"

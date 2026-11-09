@@ -1,5 +1,26 @@
 # Agent sessions
 
+Project-owned sessions use
+`docling://projects/{project_id}/sessions/{session_id}`. Start one and launch
+an agent with `dc session start --project materials --agent codex`. The CLI
+installs the agent's MCP connection and `dc` skill, starts the project session,
+waits for the agent, then closes the session when it exits. Use
+`dc session list --project materials` to see the agent and state. The `--no-launch` flag creates a project session for an agent already running.
+
+When an agent is already running, its installed `dc` skill uses MCP
+`project_session_start`, `session_append`, and `project_session_close`. The
+launcher passes `DOCLING_CONTEXT_PROJECT` and the full
+`DOCLING_CONTEXT_SESSION` URI to its child. The child should append useful
+outcomes; an agent conversation is not automatically copied into DCLX. The
+project's session count appears in `dc overview`.
+
+Closing a project session queues compilation of shared memory proposals; run
+`dc memory worker --once` to process the queue. Project abstract/overview
+jobs and ingestion jobs are separate queues.
+
+The Python `SessionStore` still supports user-scoped private sessions. The
+human-facing `dc session start` path now requires a project and agent.
+
 `SessionStore` appends agent turns, tool calls, tool results, and feedback to a
 revisioned DCLX package at
 `docling://users/{tenant}/{user}/sessions/{session_id}`. Each event is a DocLang

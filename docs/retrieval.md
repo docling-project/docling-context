@@ -1,9 +1,9 @@
 # Scoped retrieval
 
-`dc search` uses the local SQLite index and works without an embedding model:
+`dc library search` uses the local SQLite index and works without an embedding model:
 
 ```bash
-uv run dc search "glacier" --uri docling://resources/articles \
+uv run dc library search --query "glacier" --project climate \
   --xpath '/doclang[1]/text[1]' -k 5 --max-tokens 1000
 ```
 
@@ -11,8 +11,8 @@ Ingestion indexes each document automatically. Run `dc index status` to inspect
 both indexes, or `dc index lex rebuild` to regenerate lexical records from stored DCLX
 packages. Rebuilding the SQLite index does not generate embeddings. Run
 `uv run --extra vectors dc index vector rebuild` to generate them with the default
-local model, then `dc search` uses hybrid mode automatically. Use
-`dc search --mode lexical` to request lexical search explicitly.
+local model, then `dc library search` uses hybrid mode automatically. Use
+`dc library search --mode lexical` to request lexical search explicitly.
 On Apple Silicon, vector rebuilding selects MLX for supported BGE models when
 installed; other models use FastEmbed's ONNX runtime. The backend is part of the
 stored model ID, so changing backends regenerates vectors. Both rebuild
@@ -25,18 +25,25 @@ the first and last 64 characters separated by ` ... `. Use `--json` for the
 complete citation records, including URI, revision, page, bounding box, full
 bounded text, and truncation status. A footer reports how many nodes are shown
 out of all indexed lexical matches in scope, before result and token limits.
+Results are ordered by descending `Score`: lexical score plus nonnegative
+vector score and the `Tier`, `Fresh`, and `Near` bonuses. The `Vec` column alone
+may therefore rise or fall between adjacent rows. In vector mode, `Lex` is zero.
+Search considers every current indexed node in the selected scope. The `-k`
+option limits returned citations, not the nodes examined for a match.
 `--document` restricts a query to one URI;
 `--tier` can be repeated. `--max-tokens` and
 `--per-result-tokens` limit the returned text using whitespace-delimited tokens.
 Multiword lexical searches first look for nodes containing every query word;
 if none match, they use any-word matching. The footer counts matches for the
 selected lexical query.
-The `@summary:` and `@toc:` XPath prefixes denote sidecars within the cited
-DCLX revision. The default summary is the first 600 characters of extracted
-heading and text content, so it can include publisher boilerplate. The TOC is
+The `@summary:` and `@toc:` XPath prefixes denote the summary and outline
+within the cited DCLX revision. Validated outlines are stored as native
+`annotations/toc.dclg` companion documents. The default
+summary is the first 600 characters of extracted heading and text content, so
+it can include publisher boilerplate. The outline is
 made from headings and may duplicate a heading hit. Source XML is never
-rewritten for indexing. Matching summary and outline hits are assembled before
-body nodes, with relevance ordering within each tier.
+rewritten for indexing. Summary and outline hits receive tier bonuses, while
+all hits compete in the same score order.
 
 The Python API supports lexical, vector, and hybrid modes:
 
@@ -47,7 +54,7 @@ with LocalContextStore("./context-data") as store:
     result = Retriever(store).search(
         Principal("default", "local"),
         "glacier",
-        scope=SearchScope(uri="docling://resources/articles"),
+        scope=SearchScope(project_id="climate"),
         mode="lexical",
     )
 ```
@@ -58,11 +65,13 @@ and hybrid queries. The provider implements `model_id`, `dimensions`, and
 stable `uint64` IDs from SQLite, contiguous `float32` arrays, L2 normalization,
 and `IdMapIndex` with a SQL-derived allowlist. Dimensions must be a multiple of
 eight, from 8 to 16,384. One model and dimension generation is active per
-store. Replacing the provider rebuilds the vector generation.
+store. Run `dc index vector rebuild --model MODEL` to change the provider.
 
 ```python
 retriever = Retriever(store, embedder=my_embedding_provider)
 result = retriever.search(principal, "glacier", mode="hybrid")
+for warning in result.warnings:
+    print(warning)
 ```
 
 The built-in local adapter supports direct text, image, and combined inputs:
@@ -92,9 +101,13 @@ For a picture hit, `store.get_document(principal, hit.uri).get_part_bytes(hit.as
 reads the cited image from its DCLX package.
 
 SQLite stores vector metadata and embedding bytes. The turbovec snapshot is a
-rebuildable projection. A missing or corrupt snapshot triggers a full rebuild;
-compatible snapshots replay later outbox changes for only the affected URIs.
-Changing the embedding model also requires a full rebuild. Search checks each
+rebuildable projection. A missing or corrupt snapshot stops vector search with
+instructions to run `dc index vector rebuild`. An incomplete snapshot produces
+a warning and uses its saved vectors until rebuilt. Search never updates vector
+storage implicitly. Changing the embedding model also requires a full rebuild.
+Lexical search warns about missing or outdated document records and tells you
+to run `dc index lex rebuild`; it does not repair records during search.
+Search checks each
 candidate against the current document revision and reads cited text from DCLX,
 so stale index records are excluded.
 The retriever enforces tenant, URI subtree, optional document, XPath subtree,
@@ -119,7 +132,7 @@ an existing store, create a JSON list such as:
 [
   {
     "query": "Koonap formation in the Karoo Basin",
-    "relevant_uris": ["docling://resources/documents/example-paper"]
+    "relevant_uris": ["docling://resources/library/example-paper"]
   }
 ]
 ```

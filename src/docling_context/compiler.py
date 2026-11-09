@@ -8,11 +8,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from .catalog import Catalog
 from .durable_memory import MemoryService, SourceCitation
 from .local import LocalContextStore, RecordMissing
 from .models import Principal
 from .profiles import MAX_SESSION_EVENTS
 from .sessions import SessionStore
+from .uri import parse_uri
 
 
 def _now() -> str:
@@ -63,17 +65,30 @@ class MemoryCompiler:
                FROM outbox o JOIN documents d
                  ON d.tenant_id=o.tenant_id AND d.uri=o.uri
                 AND d.revision_id=o.revision_id
-               WHERE o.operation='put' AND o.uri LIKE 'docling://users/%/sessions/%'
+               WHERE o.operation='put' AND
+                 (o.uri LIKE 'docling://users/%/sessions/%' OR
+                  o.uri LIKE 'docling://projects/%/sessions/%')
                AND NOT EXISTS (SELECT 1 FROM memory_compile_jobs j
                  WHERE j.tenant_id=o.tenant_id AND j.session_uri=o.uri
                    AND j.session_revision_id=o.revision_id)"""
         ).fetchall()
         added = 0
         for row in rows:
-            parts = row["uri"].split("/")
-            if len(parts) != 7 or parts[5] != "sessions":
-                continue
-            principal = Principal(parts[3], parts[4])
+            address = parse_uri(row["uri"])
+            if address.namespace == "projects":
+                owner = self.store.db.execute(
+                    """SELECT owner_id FROM dc_project_sessions
+                       WHERE tenant_id=? AND project_id=? AND session_id=?""",
+                    (row["tenant_id"], address.segments[0], address.segments[2]),
+                ).fetchone()
+                if owner is None:
+                    continue
+                principal = Principal(row["tenant_id"], owner["owner_id"])
+            else:
+                parts = row["uri"].split("/")
+                if len(parts) != 7 or parts[5] != "sessions":
+                    continue
+                principal = Principal(parts[3], parts[4])
             try:
                 self.sessions.uri(principal, row["uri"])
             except (ValueError, PermissionError):
@@ -187,6 +202,9 @@ class MemoryCompiler:
                 generator="deterministic-v1",
                 confidence=0.5,
             )
+            address = parse_uri(current.uri)
+            if address.namespace == "projects":
+                Catalog(self.store).link(principal, address.segments[0], before.uri)
             if before.status == "proposed" and before.citations == (citation,):
                 count += 1
         return count

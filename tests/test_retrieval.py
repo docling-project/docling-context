@@ -11,12 +11,15 @@ from doclang import DocLangXDocument
 from docling_context import (
     Ingestor,
     LocalContextStore,
+    MemoryService,
     Principal,
     Retriever,
     SearchScope,
     TurbovecIndex,
 )
 from docling_context.cli import _search_excerpt, main
+from docling_context.service import ContextService, SearchRequest
+from docling_context.vectors import VectorStorageUnavailable
 
 
 def _package(body: str) -> bytes:
@@ -50,6 +53,149 @@ class WordVectors:
                 values[index] += 1.0
             output.append(values)
         return output
+
+
+def _maintenance_retriever(store, provider):
+    """Exercise the explicit index maintenance path used by legacy tests."""
+    return Retriever(
+        store, embedder=provider, vector_index=TurbovecIndex(store, provider)
+    )
+
+
+def test_vector_search_requires_saved_storage(tmp_path, capsys):
+    pytest.importorskip("turbovec")
+    principal = Principal("north", "alice")
+    with LocalContextStore(tmp_path) as store:
+        store.put(
+            principal,
+            "docling://resources/notes/one",
+            _package("<doclang><text>ice</text></doclang>"),
+        )
+        with pytest.raises(VectorStorageUnavailable, match="dc index vector rebuild"):
+            Retriever(store, embedder=WordVectors())
+    command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
+    assert (
+        main([*command, "library", "search", "--query", "ice", "--mode", "vector"]) == 1
+    )
+    assert "dc index vector rebuild" in capsys.readouterr().err
+
+
+def test_stale_vector_search_warns_without_rebuilding(tmp_path, capsys, monkeypatch):
+    pytest.importorskip("turbovec")
+    principal = Principal("north", "alice")
+    with LocalContextStore(tmp_path) as store:
+        store.put(
+            principal,
+            "docling://resources/notes/one",
+            _package("<doclang><text>ice</text></doclang>"),
+        )
+        TurbovecIndex(store, WordVectors(), force_rebuild=True)
+        generation = store.db.execute("SELECT generation FROM vector_state").fetchone()[
+            0
+        ]
+        store.put(
+            principal,
+            "docling://resources/notes/two",
+            _package("<doclang><text>basalt</text></doclang>"),
+        )
+        result = Retriever(store, embedder=WordVectors()).search(
+            principal, "ice", mode="vector"
+        )
+        assert result.hits
+        assert result.warnings and "dc index vector rebuild" in result.warnings[0]
+        monkeypatch.setattr(
+            "docling_context.cli.stored_embedding_provider",
+            lambda _model: WordVectors(),
+        )
+        command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
+        assert (
+            main(
+                [
+                    *command,
+                    "library",
+                    "search",
+                    "--query",
+                    "ice",
+                    "--mode",
+                    "vector",
+                    "--uri",
+                    "docling://resources/",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        output = capsys.readouterr()
+        assert "dc index vector rebuild" in output.err
+        assert json.loads(output.out.splitlines()[0])["uri"].endswith("/one")
+        monkeypatch.setattr(
+            "docling_context.embeddings.stored_embedding_provider",
+            lambda _model: WordVectors(),
+        )
+        service_result = (
+            ContextService(store, principal)
+            .search(SearchRequest("ice", mode="vector"))
+            .data
+        )
+        assert service_result["warnings"] == list(result.warnings)
+        assert (
+            store.db.execute("SELECT generation FROM vector_state").fetchone()[0]
+            == generation
+        )
+        assert store.index_status(principal)["vector_snapshot_current"] is False
+        store.db.execute("DELETE FROM retrieval_fts")
+        combined = Retriever(store, embedder=WordVectors()).search(
+            principal, "ice", mode="vector"
+        )
+        assert len(combined.warnings) == 2
+        assert "dc index lex rebuild" in combined.warnings[0]
+        assert "dc index vector rebuild" in combined.warnings[1]
+        (tmp_path / f"vectors-{generation}.tvim").write_bytes(b"corrupt")
+        with pytest.raises(VectorStorageUnavailable, match="dc index vector rebuild"):
+            Retriever(store, embedder=WordVectors())
+
+
+def test_search_warns_without_repairing_missing_lexical_records(tmp_path, capsys):
+    principal = Principal("north", "alice")
+    uri = "docling://resources/notes/one"
+    with LocalContextStore(tmp_path) as store:
+        store.put(
+            principal, uri, _package("<doclang><text>amber fossil</text></doclang>")
+        )
+        store.db.execute("DELETE FROM retrieval_fts")
+        store.db.execute("DELETE FROM retrieval_units")
+    with LocalContextStore(tmp_path) as store:
+        result = Retriever(store).search(principal, "fossil", mode="lexical")
+        assert result.hits == ()
+        assert result.warnings and "dc index lex rebuild" in result.warnings[0]
+        assert store.index_status(principal)["indexed_documents"] == 0
+        assert (
+            store.db.execute("SELECT COUNT(*) FROM retrieval_units").fetchone()[0] == 0
+        )
+        service_result = (
+            ContextService(store, principal)
+            .search(SearchRequest("fossil", mode="lexical"))
+            .data
+        )
+        assert service_result["warnings"] == list(result.warnings)
+    command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
+    assert (
+        main([*command, "library", "search", "--query", "fossil", "--mode", "lexical"])
+        == 0
+    )
+    assert "dc index lex rebuild" in capsys.readouterr().err
+
+
+def test_proposed_memory_is_not_reindexed_on_each_search(tmp_path, monkeypatch):
+    principal = Principal("north", "alice")
+    with LocalContextStore(tmp_path) as store:
+        MemoryService(store).create(principal, "fact", "Unreviewed claim")
+        assert store.index_status(principal)["indexed_documents"] == 1
+        monkeypatch.setattr(
+            "docling_context.local.index_package",
+            lambda *_args: pytest.fail("already indexed proposed memory"),
+        )
+        assert Retriever(store).search(principal, "claim", mode="lexical").hits == ()
 
 
 def test_lexical_scope_exact_citations_and_budget(tmp_path):
@@ -167,7 +313,7 @@ def test_replacement_delete_and_stale_row_are_never_cited(tmp_path):
         assert retrieval.search(principal, "basalt", mode="lexical").hits == ()
 
 
-def test_cli_search_and_schema_backfill(tmp_path, capsys):
+def test_cli_search_warns_until_lexical_rebuild(tmp_path, capsys):
     principal = Principal("north", "alice")
     uri = "docling://resources/notes/one"
     with LocalContextStore(tmp_path) as store:
@@ -177,7 +323,12 @@ def test_cli_search_and_schema_backfill(tmp_path, capsys):
         store.db.execute("DELETE FROM retrieval_fts")
         store.db.execute("DELETE FROM retrieval_units")
     with LocalContextStore(tmp_path) as store:
-        assert Retriever(store).search(principal, "fossil", mode="lexical").hits
+        result = Retriever(store).search(principal, "fossil", mode="lexical")
+        assert result.hits == ()
+        assert result.warnings
+    command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
+    assert main([*command, "index", "lex", "rebuild", "--json"]) == 0
+    capsys.readouterr()
     assert (
         main(
             [
@@ -187,7 +338,9 @@ def test_cli_search_and_schema_backfill(tmp_path, capsys):
                 "north",
                 "--user",
                 "alice",
+                "library",
                 "search",
+                "--query",
                 "fossil",
                 "--uri",
                 "docling://resources/notes",
@@ -206,7 +359,9 @@ def test_cli_search_and_schema_backfill(tmp_path, capsys):
                 "north",
                 "--user",
                 "alice",
+                "library",
                 "search",
+                "--query",
                 "fossil",
                 "--uri",
                 "docling://resources/notes",
@@ -258,7 +413,9 @@ def test_search_reports_matching_nodes_before_result_limit(tmp_path, capsys):
         "north",
         "--user",
         "alice",
+        "library",
         "search",
+        "--query",
         "fossil",
         "--uri",
         "docling://resources/notes",
@@ -267,7 +424,7 @@ def test_search_reports_matching_nodes_before_result_limit(tmp_path, capsys):
     ]
     assert main(command) == 0
     assert "Showing 1 of 3 matching nodes." in capsys.readouterr().out
-    assert main(command[:7] + ["missing"] + command[8:]) == 0
+    assert main(command[:9] + ["missing"] + command[10:]) == 0
     assert "Showing 0 of 0 matching nodes." in capsys.readouterr().out
 
 
@@ -298,16 +455,18 @@ def test_index_status_and_rebuild_restore_search_records(tmp_path, capsys):
     assert main([*command, "index", "status", "--json"]) == 0
     status = json.loads(capsys.readouterr().out)
     assert status["documents"] == 1
-    assert status["indexed_documents"] == 1
+    assert status["indexed_documents"] == 0
     assert status["embedded_nodes"] == 0
     assert status["vector_snapshot_current"] is False
     with LocalContextStore(tmp_path) as store:
-        assert not Retriever(store).search(alice, "fossil", mode="lexical").hits
+        result = Retriever(store).search(alice, "fossil", mode="lexical")
+        assert not result.hits
+        assert result.warnings and "dc index lex rebuild" in result.warnings[0]
     assert main([*command, "index", "lex", "status"]) == 0
     assert "Indexed documents" in capsys.readouterr().out
     assert main([*command, "index", "lex", "status", "--json"]) == 0
     assert "embedded_nodes" not in json.loads(capsys.readouterr().out)
-    assert main([*command, "index", "lex", "rebuild"]) == 0
+    assert main([*command, "index", "lex", "rebuild", "--json"]) == 0
     rebuilt = json.loads(capsys.readouterr().out)
     assert rebuilt["rebuilt_documents"] == 1
     assert rebuilt["indexed_nodes"] >= 1
@@ -321,24 +480,71 @@ def test_index_status_and_rebuild_restore_search_records(tmp_path, capsys):
         )
 
 
-def test_lexical_search_filters_before_candidate_limit(tmp_path, monkeypatch):
-    monkeypatch.setattr("docling_context.retrieval._MAX_CANDIDATES", 1)
+def test_lexical_and_vector_search_reach_nodes_beyond_ten_thousand(tmp_path):
     principal = Principal("north", "alice")
     with LocalContextStore(tmp_path) as store:
-        store.put(
+        first = store.put(
             principal,
             "docling://resources/notes/first",
-            _package("<doclang><text>quartz</text></doclang>"),
-        )
-        store.put(
-            principal,
-            "docling://resources/notes/second",
             _package("<doclang><text>fossil</text></doclang>"),
         )
-        result = Retriever(store).search(principal, "fossil", mode="lexical")
-        assert result.total_hits == 1
-        assert len(result.hits) == 1
-        assert result.hits[0].uri.endswith("/second")
+        first_id = store.db.execute(
+            "SELECT MAX(vector_id) FROM retrieval_units"
+        ).fetchone()[0]
+        filler = [
+            (
+                first_id + number + 1,
+                principal.tenant_id,
+                first.uri,
+                first.document_id,
+                first.revision_id,
+                f"/doclang[1]/text[{number + 2}]",
+                2,
+                "fossil",
+                first.updated_at,
+            )
+            for number in range(10_001)
+        ]
+        with store.transaction():
+            store.db.executemany(
+                """INSERT INTO retrieval_units
+                   (vector_id,tenant_id,uri,document_id,revision_id,xpath,tier,text,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                filler,
+            )
+            store.db.executemany(
+                "INSERT INTO retrieval_fts(rowid,text) VALUES (?,?)",
+                ((row[0], "fossil") for row in filler),
+            )
+            store.db.execute(
+                "UPDATE lexical_state SET unit_count=(SELECT COUNT(*) FROM retrieval_units WHERE uri=?) WHERE uri=?",
+                (first.uri, first.uri),
+            )
+        target = store.put(
+            principal,
+            "docling://resources/notes/second",
+            _package("<doclang><text>fossil fossil fossil fossil</text></doclang>"),
+        )
+        target_id = store.db.execute(
+            "SELECT MAX(vector_id) FROM retrieval_units WHERE uri=?", (target.uri,)
+        ).fetchone()[0]
+
+        class TargetIndex:
+            def search(self, _query, allowed_ids, _k):
+                assert target_id in allowed_ids
+                return [(target_id, 0.9)]
+
+        lexical = Retriever(store).search(principal, "fossil", mode="lexical", k=1)
+        assert lexical.total_hits > 10_000
+        assert lexical.hits[0].uri == target.uri
+        vector = Retriever(
+            store, embedder=WordVectors(), vector_index=TargetIndex()
+        ).search(principal, "fossil", mode="vector", k=1)
+        assert vector.hits[0].uri == target.uri
+        hybrid = Retriever(
+            store, embedder=WordVectors(), vector_index=TargetIndex()
+        ).search(principal, "fossil", mode="hybrid", k=1)
+        assert hybrid.hits[0].uri == target.uri
 
 
 def test_vector_snapshot_restart_corruption_and_generation(tmp_path):
@@ -357,7 +563,7 @@ def test_vector_snapshot_restart_corruption_and_generation(tmp_path):
             uri,
             _package("<doclang><text>glacier private south</text></doclang>"),
         )
-        retrieval = Retriever(store, embedder=provider)
+        retrieval = _maintenance_retriever(store, provider)
         assert isinstance(retrieval.vector_index, TurbovecIndex)
         result = retrieval.search(principal, "glacier", mode="vector")
         assert result.hits[0].revision_id == first.revision_id
@@ -367,12 +573,12 @@ def test_vector_snapshot_restart_corruption_and_generation(tmp_path):
         snapshot = tmp_path / f"vectors-{generation}.tvim"
         assert snapshot.exists()
     with LocalContextStore(tmp_path) as store:
-        retrieval = Retriever(store, embedder=provider)
+        retrieval = _maintenance_retriever(store, provider)
         assert retrieval.vector_index.generation == generation
         assert retrieval.search(principal, "glacier", mode="vector").hits
     snapshot.write_bytes(b"bad snapshot")
     with LocalContextStore(tmp_path) as store:
-        retrieval = Retriever(store, embedder=provider)
+        retrieval = _maintenance_retriever(store, provider)
         assert retrieval.vector_index.generation != generation
         assert (
             retrieval.search(principal, "glacier", mode="vector").hits[0].text
@@ -392,7 +598,7 @@ def test_vector_snapshot_restart_corruption_and_generation(tmp_path):
         assert retrieval.search(principal, "glacier", mode="vector").hits == ()
     with LocalContextStore(tmp_path) as store:
         assert (
-            Retriever(store, embedder=provider)
+            _maintenance_retriever(store, provider)
             .search(principal, "glacier", mode="vector")
             .hits
             == ()
@@ -401,7 +607,7 @@ def test_vector_snapshot_restart_corruption_and_generation(tmp_path):
         class NewModel(WordVectors):
             model_id = "word-hash-2"
 
-        changed = Retriever(store, embedder=NewModel())
+        changed = _maintenance_retriever(store, NewModel())
         state = store.db.execute(
             "SELECT model_id FROM vector_state WHERE singleton=1"
         ).fetchone()
@@ -433,7 +639,7 @@ def test_vector_outbox_replay_only_embeds_changed_document(tmp_path, monkeypatch
             "docling://resources/notes/two",
             _package("<doclang><text>basalt lava</text></doclang>"),
         )
-        retriever = Retriever(store, embedder=provider)
+        retriever = _maintenance_retriever(store, provider)
         initial = retriever.vector_index.generation
         monkeypatch.setattr(
             retriever.vector_index,
@@ -473,12 +679,12 @@ def test_legacy_vector_snapshot_rebuilds_membership_on_upgrade(tmp_path):
             "docling://resources/notes/one",
             _package("<doclang><text>glacier ice</text></doclang>"),
         )
-        old_generation = Retriever(
-            store, embedder=WordVectors()
+        old_generation = _maintenance_retriever(
+            store, WordVectors()
         ).vector_index.generation
         store.db.executescript("DROP TABLE vector_members; PRAGMA user_version=3;")
     with LocalContextStore(tmp_path) as store:
-        retriever = Retriever(store, embedder=WordVectors())
+        retriever = _maintenance_retriever(store, WordVectors())
         assert retriever.vector_index.generation != old_generation
         assert retriever.search(principal, "glacier", mode="vector").hits
         assert store.db.execute("SELECT COUNT(*) FROM vector_members").fetchone()[0] > 0
@@ -493,15 +699,22 @@ def test_existing_retrieval_index_adds_picture_column_on_upgrade(tmp_path):
             _package("<doclang><text>glacier ice</text></doclang>"),
         )
         store.db.executescript(
+            "DROP TABLE lexical_state; "
             "ALTER TABLE retrieval_units DROP COLUMN asset_path; PRAGMA user_version=4;"
         )
     with LocalContextStore(tmp_path) as store:
-        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert store.db.execute("PRAGMA user_version").fetchone()[0] == 10
         assert "asset_path" in {
             row["name"]
             for row in store.db.execute("PRAGMA table_info(retrieval_units)")
         }
-        assert Retriever(store).search(principal, "glacier", mode="lexical").hits
+        stale = Retriever(store).search(principal, "glacier", mode="lexical")
+        assert stale.hits
+        assert stale.warnings and "dc index lex rebuild" in stale.warnings[0]
+        store.rebuild_index(principal)
+        assert (
+            Retriever(store).search(principal, "glacier", mode="lexical").warnings == ()
+        )
 
 
 def test_section_xpath_tracks_heading_without_changing_xml_parent(tmp_path):
@@ -530,7 +743,7 @@ def test_section_xpath_tracks_heading_without_changing_xml_parent(tmp_path):
         ]
 
 
-def test_matching_outline_precedes_body_when_budget_allows(tmp_path):
+def test_hits_rank_by_total_score_across_tiers(tmp_path):
     principal = Principal("north", "alice")
     with LocalContextStore(tmp_path) as store:
         Ingestor(store).add_resource(
@@ -545,7 +758,34 @@ def test_matching_outline_precedes_body_when_budget_allows(tmp_path):
         )
         hits = Retriever(store).search(principal, "glacier", mode="lexical", k=4).hits
         assert hits
-        assert [hit.tier for hit in hits] == sorted(hit.tier for hit in hits)
+        assert [hit.score for hit in hits] == sorted(
+            (hit.score for hit in hits), reverse=True
+        )
+
+
+def test_vector_hits_rank_by_displayed_score(tmp_path):
+    pytest.importorskip("turbovec")
+    principal = Principal("north", "alice")
+    with LocalContextStore(tmp_path) as store:
+        Ingestor(store).add_resource(
+            principal,
+            "docling://resources/notes/vector-order",
+            _package(
+                "<doclang><heading>Glacier overview</heading>"
+                "<text>Glacier glacier glacier glacier</text></doclang>"
+            ),
+            filename="vector-order.dclx",
+        )
+        TurbovecIndex(store, WordVectors(), force_rebuild=True)
+        hits = (
+            Retriever(store, embedder=WordVectors())
+            .search(principal, "glacier", mode="vector", k=10)
+            .hits
+        )
+        assert len(hits) >= 2
+        assert [hit.score for hit in hits] == sorted(
+            (hit.score for hit in hits), reverse=True
+        )
 
 
 def test_search_decodes_each_cited_package_once(tmp_path, monkeypatch):
@@ -616,7 +856,7 @@ def test_picture_assets_are_vector_units_when_provider_supports_images(tmp_path)
     with LocalContextStore(tmp_path) as store:
         store.put(principal, "docling://resources/images/one", _image_package())
         provider = ImageVectors()
-        retriever = Retriever(store, embedder=provider)
+        retriever = _maintenance_retriever(store, provider)
         assert ("image", b"first image") in provider.calls
         assert ("mixed", "Rock diagram", b"second image") in provider.calls
         hit = retriever.search(principal, "", image=b"query", mode="vector", k=1).hits[
@@ -625,7 +865,7 @@ def test_picture_assets_are_vector_units_when_provider_supports_images(tmp_path)
         assert hit.xpath == "/doclang[1]/picture[1]"
         assert hit.asset_path == "assets/one.png"
         assert hit.text == ""
-        text_only = Retriever(store, embedder=WordVectors())
+        text_only = _maintenance_retriever(store, WordVectors())
         assert text_only.search(principal, "", image=b"query", mode="vector").hits == ()
         assert (
             store.db.execute(
@@ -645,7 +885,7 @@ def test_rebuild_index_refreshes_existing_vector_retriever(tmp_path):
             "docling://resources/notes/one",
             _package("<doclang><text>glacier ice</text></doclang>"),
         )
-        retriever = Retriever(store, embedder=WordVectors())
+        retriever = _maintenance_retriever(store, WordVectors())
         first = retriever.search(principal, "glacier", mode="vector")
         assert first.hits and first.hits[0].vector_score > 0
         old_generation = retriever.vector_index.generation
@@ -698,7 +938,10 @@ def test_cli_vector_rebuild_search_and_scope_guard(tmp_path, capsys, monkeypatch
         lambda *_args, **_kwargs: WordVectors(),
     )
     command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
-    assert main([*command, "index", "vector", "rebuild", "--backend", "onnx"]) == 0
+    assert (
+        main([*command, "index", "vector", "rebuild", "--backend", "onnx", "--json"])
+        == 0
+    )
     assert selected_backends == ["onnx"]
     assert json.loads(capsys.readouterr().out)["embedded_nodes"] > 0
     assert main([*command, "index", "vector", "status"]) == 0
@@ -706,7 +949,7 @@ def test_cli_vector_rebuild_search_and_scope_guard(tmp_path, capsys, monkeypatch
     assert "Vector model" in vector_table and "word-hash-1" in vector_table
     assert main([*command, "index", "vector", "status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["vector_model"] == "word-hash-1"
-    assert main([*command, "search", "glacier"]) == 0
+    assert main([*command, "library", "search", "--query", "glacier"]) == 0
     output = capsys.readouterr().out
     assert "Showing" in output and "ranked nodes" in output
     with LocalContextStore(tmp_path) as store:

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 
+from .catalog import Catalog, new_document_uri
 from .conversion_config import PdfConversionConfig
 from .converters import LocalDoclingConverter
 from .ingestion import Ingestor
@@ -29,6 +31,7 @@ class IngestJob:
     error: str | None
     created_at: str
     updated_at: str
+    project_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -46,9 +49,20 @@ class IngestQueue:
         filename: str,
         *,
         force: bool = False,
+        project_id: str | None = None,
     ) -> IngestJob:
+        uri = uri or new_document_uri()
         address = parse_uri(uri)
         authorize_uri(principal, address)
+        if project_id and (
+            address.namespace != "resources"
+            or address.segments[0] != "library"
+            or len(address.segments) != 2
+        ):
+            raise ValueError("project ingestion requires a flat library URI")
+        if project_id:
+            with Catalog(self.store) as catalog:
+                catalog.get_project(principal, project_id)
         if not 0 < len(source) <= MAX_QUEUED_BYTES or not filename:
             raise ValueError("queued source must be nonempty and at most 2.5 MB")
         job_id, stamp = uuid.uuid4().hex, _now()
@@ -56,7 +70,8 @@ class IngestQueue:
             self.store.db.execute(
                 """INSERT INTO ingest_jobs
                    (job_id,tenant_id,user_id,uri,filename,source,force,status,
-                    created_at,updated_at) VALUES (?,?,?,?,?,?,?,'queued',?,?)""",
+                    created_at,updated_at,project_id)
+                   VALUES (?,?,?,?,?,?,?,'queued',?,?,?)""",
                 (
                     job_id,
                     principal.tenant_id,
@@ -67,6 +82,7 @@ class IngestQueue:
                     int(force),
                     stamp,
                     stamp,
+                    project_id,
                 ),
             )
         return self.get(principal, job_id)
@@ -100,31 +116,50 @@ class IngestQueue:
             )
         principal = Principal(row["tenant_id"], row["user_id"])
         revision = None
+        final_uri = row["uri"]
         error = None
         try:
-            record = Ingestor(
+            ingestor = Ingestor(
                 self.store,
                 converter=LocalDoclingConverter(
                     PdfConversionConfig(document_timeout=300)
                 ),
-            ).add_resource(
-                principal,
-                row["uri"],
-                row["source"],
-                filename=row["filename"],
-                force=bool(row["force"]),
             )
+            address = parse_uri(row["uri"])
+            if address.namespace == "resources" and address.segments[0] == "library":
+                digest = hashlib.sha256(row["source"]).hexdigest()
+                with Catalog(self.store) as catalog, self.store.transaction():
+                    final_uri = catalog.find_source(principal, digest) or row["uri"]
+                    record = ingestor.add_resource(
+                        principal,
+                        final_uri,
+                        row["source"],
+                        filename=row["filename"],
+                        force=bool(row["force"]),
+                    )
+                    catalog.register_resource(principal, record)
+                    if row["project_id"]:
+                        catalog.link(principal, row["project_id"], record.uri)
+            else:
+                record = ingestor.add_resource(
+                    principal,
+                    row["uri"],
+                    row["source"],
+                    filename=row["filename"],
+                    force=bool(row["force"]),
+                )
             revision = record.revision_id
         except Exception as exc:  # noqa: BLE001 - converter failures must be recorded
             error = f"{type(exc).__name__}: {exc}"[:2_000]
         with self.store.transaction():
             self.store.db.execute(
-                """UPDATE ingest_jobs SET status=?,revision_id=?,error=?,
+                """UPDATE ingest_jobs SET status=?,revision_id=?,error=?,uri=?,
                    source=x'',lease_until=NULL,updated_at=? WHERE job_id=?""",
                 (
                     "failed" if error else "completed",
                     revision,
                     error,
+                    final_uri,
                     _now(),
                     row["job_id"],
                 ),

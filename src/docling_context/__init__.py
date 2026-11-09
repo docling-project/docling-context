@@ -1,5 +1,6 @@
 """Local-first context storage backed by DocLang packages."""
 
+from .catalog import Catalog, Project
 from .compiler import MemoryCompiler, MemoryJob, redact_secrets
 from .contracts import ContextStore
 from .conversion_config import PdfConversionConfig
@@ -37,6 +38,7 @@ from .models import (
     TreeEntry,
 )
 from .package import FilePackageStore, PackageError, PackageMissing
+from .project_context import ProjectContextWorker
 from .remote import RemoteContextService
 from .retrieval import ContextResult, RetrievalHit, Retriever, SearchScope
 from .service import (
@@ -44,11 +46,19 @@ from .service import (
     ContextService,
     IngestRequest,
     JobStatusRequest,
+    KnowledgeFactRequest,
+    KnowledgeFactsRequest,
     ListRequest,
     MemoryListRequest,
     MemoryRecallRequest,
     MemoryReviewRequest,
     OutlineRequest,
+    OverviewRequest,
+    ProjectLinkRequest,
+    ProjectRequest,
+    ProjectSessionRequest,
+    ResourceLinkRequest,
+    ResourceLinksRequest,
     SearchRequest,
     ServiceError,
     ServiceResult,
@@ -65,6 +75,7 @@ __all__ = [
     "DEFAULT_MODEL",
     "SCHEMA_VERSION",
     "AccessDenied",
+    "Catalog",
     "ChangeEvent",
     "CollectionStatus",
     "CollectionWorker",
@@ -86,6 +97,8 @@ __all__ = [
     "InvalidURI",
     "Job",
     "JobStatusRequest",
+    "KnowledgeFactRequest",
+    "KnowledgeFactsRequest",
     "ListRequest",
     "LocalContextStore",
     "LocalDoclingConverter",
@@ -101,13 +114,21 @@ __all__ = [
     "NodeAddress",
     "NodeContent",
     "OutlineRequest",
+    "OverviewRequest",
     "PackageError",
     "PackageMissing",
     "PackageRef",
     "PdfConversionConfig",
     "Principal",
+    "Project",
+    "ProjectContextWorker",
+    "ProjectLinkRequest",
+    "ProjectRequest",
+    "ProjectSessionRequest",
     "RecordMissing",
     "RemoteContextService",
+    "ResourceLinkRequest",
+    "ResourceLinksRequest",
     "RetrievalHit",
     "Retriever",
     "RevisionConflict",

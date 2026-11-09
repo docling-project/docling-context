@@ -8,16 +8,17 @@ import uuid
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Protocol
-from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
 from doclang import DocLangXDocument
 
 from .contracts import ContextStore
 from .converters import ConversionResult, Converter, LocalDoclingConverter
+from .doclang_authoring import outline_xml, set_outline, set_summary, validate_doclang
 from .local import RecordMissing
 from .models import DocumentRecord, Principal
 from .package import MAX_PACKAGE_BYTES, PackageError, bounded_nodes, load_package
+from .profiles import DESCRIPTOR_PARTS
 from .uri import authorize_uri, parse_uri
 
 
@@ -42,26 +43,21 @@ def _toc(document: DocLangXDocument) -> str:
         for node in bounded_nodes(document, limit=10_000, text_bytes=512)
         if node["name"] == "heading"
     ][:256]
-    root = ET.Element("doclang")
-    toc = ET.SubElement(root, "toc")
+    from xml.etree import ElementTree as ET
+
     xml_headings = [
         element
         for element in ET.fromstring(document.xml()).iter()
         if element.tag.rsplit("}", 1)[-1] == "heading"
     ][:256]
-    stack: list[tuple[int, ET.Element]] = []
+    entries: list[tuple[str, str, int]] = []
     for node, element in zip(headings, xml_headings, strict=False):
         try:
-            level = max(1, min(6, int(element.get("level", "1"))))
+            level = max(1, int(element.get("level", "1")))
         except ValueError:
             level = 1
-        while stack and stack[-1][0] >= level:
-            stack.pop()
-        parent = stack[-1][1] if stack else toc
-        entry = ET.SubElement(parent, "entry", {"xpath": str(node["xpath"])})
-        ET.SubElement(entry, "description").text = str(node["text"])[:200]
-        stack.append((level, entry))
-    return ET.tostring(root, encoding="unicode")
+        entries.append((str(node["xpath"]), str(node["text"])[:200], level))
+    return outline_xml(entries)
 
 
 def _fingerprint(source: bytes, converter_id: str, options: dict[str, object]) -> str:
@@ -102,6 +98,7 @@ class Ingestor:
         filename: str | None = None,
         origin_uri: str | None = None,
         force: bool = False,
+        profile_metadata: dict[str, object] | None = None,
     ) -> DocumentRecord:
         address = parse_uri(uri)
         authorize_uri(principal, address)
@@ -158,6 +155,8 @@ class Ingestor:
             if self.summary_provider is None
             else type(self.summary_provider).__qualname__
         )
+        if profile_metadata is not None:
+            options["profile_metadata"] = profile_metadata
         fingerprint = _fingerprint(data, converter_id, options)
         try:
             current = self.store.get_record(principal, address.value)
@@ -177,11 +176,26 @@ class Ingestor:
             document = DocLangXDocument()
             if not document.read_xml(data.decode("utf-8")):
                 raise PackageError(document.last_error() or "invalid DocLang XML")
+            validate_doclang(document, label="DCLG source")
             conversion = ConversionResult(b"", "doclang-native", "1")
         else:
             assert converter is not None
             conversion = converter.convert(data, name)
             document = load_package(conversion.package)
+
+        if profile_metadata is not None:
+            resource_type = address.segments[0]
+            if address.namespace != "resources" or resource_type not in {
+                "skills",
+                "concepts",
+                "knowledge",
+            }:
+                raise ValueError("profile metadata requires a typed shared resource")
+            document.set_part_text(
+                DESCRIPTOR_PARTS[resource_type],
+                json.dumps(profile_metadata, sort_keys=True),
+                "application/json",
+            )
 
         method = "extractive"
         summary = _fallback_summary(document)
@@ -193,14 +207,25 @@ class Ingestor:
                 probe = DocLangXDocument()
                 if not probe.read_xml(proposed):
                     raise ValueError(probe.last_error() or "invalid summary")
-                if not document.set_document_summary(proposed):
+                validate_doclang(probe, label="model summary")
+                if not set_summary(document, proposed):
                     raise ValueError(document.last_error() or "invalid summary sidecar")
                 method = "model"
             except Exception:  # noqa: BLE001 - providers may raise arbitrary exceptions
                 method = "extractive-fallback"
-        if method != "model" and not document.set_document_summary(summary):
-            raise PackageError(document.last_error() or "cannot set summary")
-        if not document.set_toc(_toc(document)):
+        if method != "model":
+            summary_probe = DocLangXDocument()
+            if not summary_probe.read_xml(summary):
+                raise PackageError(summary_probe.last_error() or "invalid summary")
+            validate_doclang(summary_probe, label="summary")
+            if not set_summary(document, summary):
+                raise PackageError(document.last_error() or "cannot set summary")
+        toc_xml = _toc(document)
+        toc_probe = DocLangXDocument()
+        if not toc_probe.read_xml(toc_xml):
+            raise PackageError(toc_probe.last_error() or "invalid TOC")
+        validate_doclang(toc_probe, label="TOC")
+        if not set_outline(document, toc_xml):
             raise PackageError(document.last_error() or "cannot set TOC")
         manifest = {
             "schema_version": 1,

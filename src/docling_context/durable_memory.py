@@ -12,6 +12,7 @@ from xml.sax.saxutils import escape
 
 from doclang import DocLangXDocument
 
+from .catalog import Catalog
 from .local import LocalContextStore, RecordMissing
 from .models import NodeAddress, Principal
 from .package import PackageError, PackageMissing
@@ -63,17 +64,16 @@ class MemoryService:
 
     @staticmethod
     def _prefix(principal: Principal) -> str:
-        return f"docling://users/{principal.tenant_id}/{principal.user_id}/memories"
+        return "docling://resources/memories"
 
     @classmethod
     def _uri(cls, principal: Principal, uri: str) -> str:
         address = parse_uri(uri)
         authorize_uri(principal, address)
         if (
-            address.namespace != "users"
-            or len(address.segments) != 5
-            or address.segments[2] != "memories"
-            or address.segments[3] not in MEMORY_KINDS
+            address.namespace != "resources"
+            or len(address.segments) != 2
+            or address.segments[0] != "memories"
         ):
             raise ValueError("expected one memory URI")
         return address.value
@@ -82,10 +82,7 @@ class MemoryService:
         uri = self._uri(principal, uri)
         stored = self.store.get_record(principal, uri)
         metadata = validate_memory(self.store.get_document(principal, uri))
-        if (
-            metadata["kind"] != parse_uri(uri).segments[3]
-            or metadata["memory_id"] != parse_uri(uri).segments[4]
-        ):
+        if metadata["memory_id"] != parse_uri(uri).segments[1]:
             raise ValueError("memory metadata differs from URI")
         return MemoryRecord(
             uri=uri,
@@ -127,6 +124,9 @@ class MemoryService:
             if indexed is not None and indexed["revision_id"] == row["revision_id"]:
                 continue
             record = self._record(principal, uri)
+            owner_id = validate_memory(self.store.get_document(principal, uri)).get(
+                "owner_id", principal.user_id
+            )
             with self.store.transaction():
                 self.store.db.execute(
                     """INSERT INTO memory_index
@@ -140,7 +140,7 @@ class MemoryService:
                        updated_at=excluded.updated_at""",
                     (
                         principal.tenant_id,
-                        principal.user_id,
+                        owner_id,
                         uri,
                         record.memory_id,
                         record.kind,
@@ -164,7 +164,7 @@ class MemoryService:
                     (
                         (
                             principal.tenant_id,
-                            principal.user_id,
+                            owner_id,
                             uri,
                             citation.uri,
                             citation.document_id,
@@ -175,8 +175,8 @@ class MemoryService:
                     ),
                 )
         stale = self.store.db.execute(
-            "SELECT uri FROM memory_index WHERE tenant_id=? AND user_id=?",
-            (principal.tenant_id, principal.user_id),
+            "SELECT uri FROM memory_index WHERE tenant_id=?",
+            (principal.tenant_id,),
         ).fetchall()
         with self.store.transaction():
             for row in stale:
@@ -193,6 +193,15 @@ class MemoryService:
     def get(self, principal: Principal, uri: str) -> MemoryRecord:
         self._sync(principal)
         return self._record(principal, uri)
+
+    def _assert_owner(self, principal: Principal, uri: str) -> None:
+        self._sync(principal)
+        row = self.store.db.execute(
+            "SELECT user_id FROM memory_index WHERE tenant_id=? AND uri=?",
+            (principal.tenant_id, uri),
+        ).fetchone()
+        if row is not None and row["user_id"] != principal.user_id:
+            raise PermissionError("memory owner does not match")
 
     def _validate_citations(
         self, principal: Principal, citations: tuple[SourceCitation, ...]
@@ -222,25 +231,34 @@ class MemoryService:
         metadata: dict,
         *,
         expected_revision: str | None,
+        source_document: DocLangXDocument | None = None,
     ) -> MemoryRecord:
-        document = DocLangXDocument()
-        xml = (
-            f"<doclang><heading>{escape(metadata['kind'])}</heading>"
-            f"<text>{escape(metadata['claim'])}</text>"
-            f"<text>{escape(metadata['explanation'])}</text></doclang>"
-        )
-        if not document.read_xml(xml):
-            raise ValueError(document.last_error())
+        document = source_document
+        if document is None and expected_revision and metadata.get("authored_document"):
+            previous = self.store.get_document(principal, uri)
+            if validate_memory(previous)["claim"] == metadata["claim"]:
+                document = previous
+        if document is None:
+            document = DocLangXDocument()
+            xml = (
+                f"<doclang><heading>{escape(metadata['kind'])}</heading>"
+                f"<text>{escape(metadata['claim'])}</text>"
+                f"<text>{escape(metadata['explanation'])}</text></doclang>"
+            )
+            if not document.read_xml(xml):
+                raise ValueError(document.last_error())
         document.set_part_text(
             MEMORY_PART, json.dumps(metadata, sort_keys=True), "application/json"
         )
         validate_memory(document)
-        self.store.put(
-            principal,
-            uri,
-            document.write_bytes(),
-            expected_revision=expected_revision,
-        )
+        with self.store.transaction():
+            stored = self.store.put(
+                principal,
+                uri,
+                document.write_bytes(),
+                expected_revision=expected_revision,
+            )
+            Catalog(self.store).register_resource(principal, stored, "memories")
         self._sync(principal)
         return self._record(principal, uri)
 
@@ -259,6 +277,7 @@ class MemoryService:
         accepted: bool = False,
         valid_from: str | None = None,
         valid_to: str | None = None,
+        source_document: DocLangXDocument | None = None,
     ) -> MemoryRecord:
         if kind not in MEMORY_KINDS or not isinstance(claim, str) or not claim.strip():
             raise ValueError("invalid memory kind or claim")
@@ -268,19 +287,19 @@ class MemoryService:
         self._sync(principal)
         key = _claim_key(claim)
         existing = self.store.db.execute(
-            """SELECT uri FROM memory_index WHERE tenant_id=? AND user_id=?
+            """SELECT uri FROM memory_index WHERE tenant_id=?
                AND kind=? AND subject IS ? AND claim_key=?
                ORDER BY updated_at DESC LIMIT 1""",
-            (principal.tenant_id, principal.user_id, kind, subject, key),
+            (principal.tenant_id, kind, subject, key),
         ).fetchone()
         if existing is not None:
             return self._record(principal, existing["uri"])
         # Corrections retain their old claim keys to prevent replaying an older
         # session revision from reviving a claim the user already corrected.
         prior = self.store.db.execute(
-            """SELECT uri FROM memory_index WHERE tenant_id=? AND user_id=?
+            """SELECT uri FROM memory_index WHERE tenant_id=?
                AND kind=? AND subject IS ? AND status!='deleted'""",
-            (principal.tenant_id, principal.user_id, kind, subject),
+            (principal.tenant_id, kind, subject),
         ).fetchall()
         for row in prior:
             metadata = validate_memory(self.store.get_document(principal, row["uri"]))
@@ -291,13 +310,13 @@ class MemoryService:
             conflicts = [
                 row["uri"]
                 for row in self.store.db.execute(
-                    """SELECT uri FROM memory_index WHERE tenant_id=? AND user_id=?
+                    """SELECT uri FROM memory_index WHERE tenant_id=?
                        AND kind=? AND subject=? AND status='accepted'""",
-                    (principal.tenant_id, principal.user_id, kind, subject),
+                    (principal.tenant_id, kind, subject),
                 )
             ]
         memory_id = uuid.uuid4().hex
-        uri = f"{self._prefix(principal)}/{kind}/{memory_id}"
+        uri = f"{self._prefix(principal)}/{memory_id}"
         status = "accepted" if accepted else "proposed"
         metadata = {
             "profile": "memory-v1",
@@ -309,6 +328,7 @@ class MemoryService:
             "confidence": confidence,
             "subject": subject,
             "author": author,
+            "owner_id": principal.user_id,
             "generator": generator,
             "valid_from": valid_from,
             "valid_to": valid_to,
@@ -316,7 +336,15 @@ class MemoryService:
             "conflicts": conflicts,
             "history": [{"status": status, "by": author, "at": _now()}],
         }
-        return self._write(principal, uri, metadata, expected_revision=None)
+        if source_document is not None:
+            metadata["authored_document"] = True
+        return self._write(
+            principal,
+            uri,
+            metadata,
+            expected_revision=None,
+            source_document=source_document,
+        )
 
     def transition(
         self, principal: Principal, uri: str, status: str, *, reason: str = ""
@@ -324,6 +352,7 @@ class MemoryService:
         if status not in MEMORY_STATUSES:
             raise ValueError("invalid memory status")
         current = self.get(principal, uri)
+        self._assert_owner(principal, current.uri)
         if current.status == status:
             return current
         allowed = {
@@ -360,6 +389,7 @@ class MemoryService:
     def purge(self, principal: Principal, uri: str) -> int:
         """Remove a deleted claim, its revision history, and its recall records."""
         memory = self.get(principal, uri)
+        self._assert_owner(principal, memory.uri)
         if memory.status != "deleted":
             raise ValueError("delete the memory before purging it")
         rows = self.store.db.execute(
@@ -405,6 +435,7 @@ class MemoryService:
         citations: tuple[SourceCitation, ...] | None = None,
     ) -> MemoryRecord:
         current = self.get(principal, uri)
+        self._assert_owner(principal, current.uri)
         if current.status not in {"accepted", "proposed"} or not claim.strip():
             raise ValueError("only active memories can be corrected")
         sources = citations if citations is not None else current.citations
@@ -412,6 +443,7 @@ class MemoryService:
         metadata = validate_memory(self.store.get_document(principal, current.uri))
         aliases = metadata.setdefault("claim_aliases", [])
         aliases.append(_claim_key(current.claim))
+        metadata.pop("authored_document", None)
         metadata.update(
             claim=claim.strip(),
             explanation=current.explanation if explanation is None else explanation,
@@ -438,23 +470,24 @@ class MemoryService:
         """Move accepted claims with no surviving cited source back to review."""
         self._sync(principal)
         rows = self.store.db.execute(
-            """SELECT uri FROM memory_index WHERE tenant_id=? AND user_id=?
+            """SELECT uri,user_id FROM memory_index WHERE tenant_id=?
                AND status='accepted'""",
-            (principal.tenant_id, principal.user_id),
+            (principal.tenant_id,),
         ).fetchall()
         changed = 0
         for row in rows:
-            memory = self._record(principal, row["uri"])
+            owner = Principal(principal.tenant_id, row["user_id"])
+            memory = self._record(owner, row["uri"])
             if not memory.citations:
                 continue
             supported = False
             for citation in memory.citations:
                 try:
-                    current = self.store.get_record(principal, citation.uri)
+                    current = self.store.get_record(owner, citation.uri)
                     if current.document_id != citation.document_id:
                         continue
                     self.store.read_node(
-                        principal,
+                        owner,
                         NodeAddress(
                             citation.document_id, citation.revision_id, citation.xpath
                         ),
@@ -465,7 +498,7 @@ class MemoryService:
                 break
             if not supported:
                 self.transition(
-                    principal,
+                    owner,
                     memory.uri,
                     "proposed",
                     reason="cited sources unavailable",
@@ -474,22 +507,35 @@ class MemoryService:
         return changed
 
     def search(
-        self, principal: Principal, query: str = "", *, limit: int = 10
+        self,
+        principal: Principal,
+        query: str = "",
+        *,
+        limit: int = 10,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, ...]:
         if not 1 <= limit <= 100:
             raise ValueError("memory search limit is out of bounds")
         self.reconcile_sources(principal)
+        if project_id:
+            from .catalog import Catalog
+
+            Catalog(self.store).get_project(principal, project_id)
+        if not query.strip() and project_id:
+            return self.list(
+                principal, status="accepted", limit=limit, project_id=project_id
+            )
         if not query.strip():
             rows = self.store.db.execute(
-                """SELECT uri FROM memory_index WHERE tenant_id=? AND user_id=?
+                """SELECT uri FROM memory_index WHERE tenant_id=?
                    AND status='accepted' ORDER BY updated_at DESC LIMIT ?""",
-                (principal.tenant_id, principal.user_id, limit),
+                (principal.tenant_id, limit),
             ).fetchall()
             return tuple(self._record(principal, row["uri"]) for row in rows)
         result = Retriever(self.store).search(
             principal,
             query,
-            scope=SearchScope(uri=self._prefix(principal)),
+            scope=SearchScope(uri=self._prefix(principal), project_id=project_id),
             mode="lexical",
             k=100,
         )
@@ -516,6 +562,7 @@ class MemoryService:
         until: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, ...]:
         """List current claims, including review history, for the current user."""
         if (
@@ -526,8 +573,16 @@ class MemoryService:
         ):
             raise ValueError("invalid memory list filter or page")
         self.reconcile_sources(principal)
-        conditions = ["tenant_id=?", "user_id=?"]
-        params: list[str | int] = [principal.tenant_id, principal.user_id]
+        conditions = ["tenant_id=?"]
+        params: list[str | int] = [principal.tenant_id]
+        if project_id:
+            from .catalog import Catalog
+
+            Catalog(self.store).get_project(principal, project_id)
+            conditions.append(
+                "uri IN (SELECT r.uri FROM dc_project_resource_links l JOIN dc_resources r USING (tenant_id,resource_type,resource_id) WHERE l.tenant_id=? AND l.project_id=? AND l.resource_type='memories')"
+            )
+            params.extend((principal.tenant_id, project_id))
         for column, value, operator in (
             ("status", status, "="),
             ("kind", kind, "="),
@@ -551,12 +606,13 @@ class MemoryService:
         query: str = "",
         *,
         limit: int = 10,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, ...]:
         from .sessions import SessionStore
 
         session_uri = SessionStore.uri(principal, session_id)
         self.store.get_record(principal, session_uri)
-        candidates = self.search(principal, query, limit=100)
+        candidates = self.search(principal, query, limit=100, project_id=project_id)
         delivered = []
         for memory in candidates:
             with self.store.transaction():

@@ -10,6 +10,7 @@ from xml.sax.saxutils import escape
 
 from doclang import DocLangXDocument
 
+from .doclang_authoring import outline_xml, set_outline, set_summary, validate_doclang
 from .local import LocalContextStore, RecordMissing
 from .models import Principal
 from .uri import authorize_uri, parse_uri
@@ -211,15 +212,29 @@ class CollectionWorker:
             document = DocLangXDocument()
             if not document.read_xml(xml):
                 raise ValueError(document.last_error())
-            if not document.set_document_summary(
-                f"<doclang><text>{escape(f'{len(children)} documents in {job.collection_uri}')}</text></doclang>"
-            ):
+            validate_doclang(document, label="collection summary body")
+            summary_xml = f"<doclang><text>{escape(f'{len(children)} documents in {job.collection_uri}')}</text></doclang>"
+            summary_probe = DocLangXDocument()
+            if not summary_probe.read_xml(summary_xml):
+                raise ValueError(summary_probe.last_error())
+            validate_doclang(summary_probe, label="collection summary sidecar")
+            if not set_summary(document, summary_xml):
                 raise ValueError(document.last_error())
-            toc_entries = "".join(
-                f'<entry xpath="/doclang[1]/heading[{i}]"><description>{escape(child.uri.rsplit("/", 1)[-1])}</description></entry>'
-                for i, child in enumerate(children[:500], 1)
+            toc_xml = outline_xml(
+                [
+                    (
+                        f"/doclang[1]/heading[{i}]",
+                        child.uri.rsplit("/", 1)[-1],
+                        1,
+                    )
+                    for i, child in enumerate(children[:500], 1)
+                ]
             )
-            if not document.set_toc(f"<doclang><toc>{toc_entries}</toc></doclang>"):
+            toc_probe = DocLangXDocument()
+            if not toc_probe.read_xml(toc_xml):
+                raise ValueError(toc_probe.last_error())
+            validate_doclang(toc_probe, label="collection TOC")
+            if not set_outline(document, toc_xml):
                 raise ValueError(document.last_error())
             source = {
                 "kind": "collection-summary",

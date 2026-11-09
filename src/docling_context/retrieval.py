@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from doclang import DocLangXDocument
 
+from .doclang_authoring import get_outline, get_summary
 from .models import DocumentRecord, Principal
 from .package import MAX_NODE_TEXT_CHARS, bounded_nodes, load_package
 from .profiles import MEMORY_PART, profile_kind
@@ -35,7 +36,11 @@ _SEMANTIC_NAMES = {
     "description",
 }
 _MAX_RESULTS = 100
-_MAX_CANDIDATES = 10_000
+_RETRIEVAL_COLUMNS = (
+    "r.vector_id,r.tenant_id,r.uri,r.document_id,r.revision_id,r.xpath,"
+    "r.parent_xpath,r.section_xpath,r.tier,r.page,r.bbox_json,r.text,"
+    "r.updated_at,r.asset_path"
+)
 
 
 def remove_index_records(db: sqlite3.Connection, tenant_id: str, uri: str) -> None:
@@ -62,6 +67,12 @@ def index_package(
     if profile_kind(record.uri) == "memories":
         metadata = json.loads(document.get_part_text(MEMORY_PART) or "{}")
         if metadata.get("status") != "accepted":
+            db.execute(
+                """INSERT INTO lexical_state (tenant_id,uri,revision_id,unit_count)
+                   VALUES (?,?,?,0) ON CONFLICT(tenant_id,uri)
+                   DO UPDATE SET revision_id=excluded.revision_id,unit_count=0""",
+                (record.tenant_id, record.uri, record.revision_id),
+            )
             return
     units: list[
         tuple[str, str | None, str | None, int, int | None, str | None, str, str | None]
@@ -82,7 +93,7 @@ def index_package(
             else None
         )
     picture_index = 0
-    summary = document.summary()
+    summary = get_summary(document)
     if summary is not None:
         for node in bounded_nodes(summary, limit=100, text_bytes=4_096):
             if node["name"] in {"text", "paragraph"} and node["text"].strip():
@@ -99,10 +110,10 @@ def index_package(
                     )
                 )
                 break
-    toc = document.toc()
+    toc = get_outline(document)
     if toc is not None:
         for node in bounded_nodes(toc, limit=512, text_bytes=1_024):
-            if node["name"] == "description" and node["text"].strip():
+            if node["name"] in {"heading", "description"} and node["text"].strip():
                 units.append(
                     (
                         f"@toc:{node['xpath']}",
@@ -177,6 +188,13 @@ def index_package(
             "INSERT INTO retrieval_fts(rowid,text) VALUES (?,?)",
             (cursor.lastrowid, content),
         )
+    db.execute(
+        """INSERT INTO lexical_state (tenant_id,uri,revision_id,unit_count)
+           VALUES (?,?,?,?) ON CONFLICT(tenant_id,uri)
+           DO UPDATE SET revision_id=excluded.revision_id,
+             unit_count=excluded.unit_count""",
+        (record.tenant_id, record.uri, record.revision_id, len(units)),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,6 +203,7 @@ class SearchScope:
     xpath: str | None = None
     document_uri: str | None = None
     tiers: tuple[int, ...] = (0, 1, 2)
+    project_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,6 +234,7 @@ class ContextResult:
     tokens_used: int
     truncated: bool
     total_hits: int | None = None
+    warnings: tuple[str, ...] = ()
 
 
 def _query_terms(query: str, operator: str = "OR") -> str:
@@ -248,7 +268,7 @@ class Retriever:
         if embedder is not None and vector_index is None:
             from .vectors import TurbovecIndex
 
-            vector_index = TurbovecIndex(store, embedder)
+            vector_index = TurbovecIndex(store, embedder, search_only=True)
         self.vector_index = vector_index
 
     def _scope_conditions(
@@ -276,6 +296,16 @@ class Retriever:
         ]
         prefix = base + "/"
         params: list[object] = [principal.tenant_id, base, len(prefix), prefix]
+        if scope.project_id is not None:
+            from .catalog import Catalog
+
+            with Catalog(self.store) as catalog:
+                members = catalog.project_resource_uris(principal, scope.project_id)
+            if members:
+                clauses.append(f"r.uri IN ({','.join('?' for _ in members)})")
+                params.extend(members)
+            else:
+                clauses.append("0=1")
         if scope.document_uri is not None:
             clauses.append("r.uri=?")
             params.append(doc.value)
@@ -299,12 +329,14 @@ class Retriever:
         else:
             source = "retrieval_units r"
         rows = self.store.db.execute(
-            "SELECT r.* FROM "
+            "SELECT "
+            + _RETRIEVAL_COLUMNS
+            + " FROM "
             + source
             + " JOIN documents d ON d.tenant_id=r.tenant_id AND d.uri=r.uri WHERE "
             + where
-            + " ORDER BY r.vector_id LIMIT ?",
-            (*params, _MAX_CANDIDATES),
+            + " ORDER BY r.vector_id",
+            params,
         ).fetchall()
         return [
             row
@@ -313,19 +345,43 @@ class Retriever:
             or _user_allowed(principal, row["uri"])
         ]
 
-    def _lexical_count(
-        self, principal: Principal, scope: SearchScope, terms: str
-    ) -> int:
+    def _allowed_ids(self, principal: Principal, scope: SearchScope) -> set[int]:
+        """Collect every scoped ID without loading text or embeddings."""
         where, params = self._scope_conditions(principal, scope)
-        return self.store.db.execute(
-            """SELECT COUNT(*) FROM retrieval_units r
-               JOIN documents d ON d.tenant_id=r.tenant_id AND d.uri=r.uri
-               WHERE r.vector_id IN (
-                 SELECT rowid FROM retrieval_fts WHERE retrieval_fts MATCH ?
-               ) AND """
+        cursor = self.store.db.execute(
+            """SELECT r.vector_id,r.uri FROM retrieval_units r
+               JOIN documents d ON d.tenant_id=r.tenant_id AND d.uri=r.uri WHERE """
             + where,
-            (terms, *params),
-        ).fetchone()[0]
+            params,
+        )
+        allowed: set[int] = set()
+        while batch := cursor.fetchmany(1_000):
+            allowed.update(
+                row["vector_id"]
+                for row in batch
+                if parse_uri(row["uri"]).namespace != "users"
+                or _user_allowed(principal, row["uri"])
+            )
+        return allowed
+
+    def _rows_for_ids(self, identifiers: list[int]) -> list[sqlite3.Row]:
+        """Load only vector finalists after the index has searched its allowlist."""
+        rows: list[sqlite3.Row] = []
+        for start in range(0, len(identifiers), 500):
+            batch = identifiers[start : start + 500]
+            marks = ",".join("?" for _ in batch)
+            rows.extend(
+                self.store.db.execute(
+                    "SELECT "
+                    + _RETRIEVAL_COLUMNS
+                    + " FROM retrieval_units r JOIN documents d"
+                    " ON d.tenant_id=r.tenant_id AND d.uri=r.uri"
+                    " WHERE d.available=1 AND d.revision_id=r.revision_id"
+                    f" AND r.vector_id IN ({marks})",
+                    batch,
+                ).fetchall()
+            )
+        return rows
 
     def search(
         self,
@@ -350,10 +406,20 @@ class Retriever:
             raise ValueError("vector search needs an embedding provider and index")
         if not query.strip() and (image is None or mode != "vector"):
             raise ValueError("search needs query text or a vector-mode image")
+        warnings: list[str] = []
+        lexical_warning = self.store.lexical_warning(principal)
+        if lexical_warning:
+            warnings.append(lexical_warning)
         if self.vector_index is not None:
             refresh = getattr(self.vector_index, "refresh", None)
             if callable(refresh):
                 refresh()
+        if mode in {"vector", "hybrid"} and self.vector_index is not None:
+            warning = getattr(self.vector_index, "warning", None)
+            if callable(warning):
+                message = warning(principal.tenant_id)
+                if message:
+                    warnings.append(message)
         terms = _query_terms(query) if query.strip() else None
         effective_scope = scope or SearchScope()
         lexical_only = mode == "lexical" or (
@@ -367,40 +433,21 @@ class Retriever:
                 rows = focused
             else:
                 rows = self._allowed(principal, effective_scope, terms=terms)
+        elif mode != "vector":
+            rows = self._allowed(principal, effective_scope, terms=terms)
         else:
-            rows = self._allowed(
-                principal, effective_scope, terms=terms if lexical_only else None
-            )
-        total_hits = (
-            self._lexical_count(principal, effective_scope, terms)
-            if lexical_only and terms is not None
-            else None
-        )
+            rows = []
+        total_hits = len(rows) if lexical_only and terms is not None else None
         by_id = {row["vector_id"]: row for row in rows}
-        if not by_id:
-            return ContextResult((), 0, False, total_hits)
+        if not by_id and (mode == "lexical" or self.vector_index is None):
+            return ContextResult((), 0, False, total_hits, tuple(warnings))
         scores: dict[int, list[float]] = {}
         if mode in {"lexical", "hybrid"} and terms is not None:
             query_words = re.findall(r"\w+", query.casefold())
-            if lexical_only:
-                for identifier, row in by_id.items():
-                    content = row["text"].casefold()
-                    frequency = sum(content.count(term) for term in query_words)
-                    scores[identifier] = [min(1.0, frequency / 4), 0.0]
-            else:
-                identifiers = list(by_id)
-                for start in range(0, len(identifiers), 500):
-                    batch = identifiers[start : start + 500]
-                    marks = ",".join("?" for _ in batch)
-                    fts_rows = self.store.db.execute(
-                        "SELECT rowid FROM retrieval_fts WHERE retrieval_fts MATCH ? "
-                        f"AND rowid IN ({marks})",
-                        (terms, *batch),
-                    ).fetchall()
-                    for row in fts_rows:
-                        content = by_id[row["rowid"]]["text"].casefold()
-                        frequency = sum(content.count(term) for term in query_words)
-                        scores[row["rowid"]] = [min(1.0, frequency / 4), 0.0]
+            for identifier, row in by_id.items():
+                content = row["text"].casefold()
+                frequency = sum(content.count(term) for term in query_words)
+                scores[identifier] = [min(1.0, frequency / 4), 0.0]
         if mode in {"vector", "hybrid"} and self.vector_index is not None:
             assert self.embedder is not None
             if image is not None:
@@ -418,11 +465,19 @@ class Retriever:
                     if callable(query_embed)
                     else self.embedder.embed([query])[0]
                 )
+            allowed_ids = self._allowed_ids(principal, effective_scope)
             found = (
-                self.vector_index.search(query_vector, set(by_id), min(k * 4, 100))
+                self.vector_index.search(query_vector, allowed_ids, min(k * 4, 100))
                 if query_vector is not None
                 else []
             )
+            missing_ids = [
+                vector_id
+                for vector_id, _ in found
+                if vector_id in allowed_ids and vector_id not in by_id
+            ]
+            for row in self._rows_for_ids(missing_ids):
+                by_id[row["vector_id"]] = row
             for vector_id, score in found:
                 if vector_id in by_id:
                     scores.setdefault(vector_id, [0.0, 0.0])[1] = score
@@ -457,7 +512,6 @@ class Retriever:
         ranked = sorted(
             scores,
             key=lambda identifier: (
-                by_id[identifier]["tier"],
                 -(
                     scores[identifier][0]
                     + max(0.0, scores[identifier][1])
@@ -542,7 +596,7 @@ class Retriever:
                 )
             )
             truncated |= shortened or source_truncated
-        return ContextResult(tuple(hits), used, truncated, total_hits)
+        return ContextResult(tuple(hits), used, truncated, total_hits, tuple(warnings))
 
     def _exact_text(
         self,
@@ -558,7 +612,9 @@ class Retriever:
         if row["xpath"].startswith(("@summary:", "@toc:")):
             sidecar_name, xpath = row["xpath"].split(":", 1)
             sidecar = (
-                document.summary() if sidecar_name == "@summary" else document.toc()
+                get_summary(document)
+                if sidecar_name == "@summary"
+                else get_outline(document)
             )
             if sidecar is None:
                 raise KeyError(row["xpath"])
