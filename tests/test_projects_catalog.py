@@ -77,6 +77,17 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
     assert [
         (row["project_id"], row["documents"], row["skills"]) for row in overview
     ] == [("alpha", 1, 1), ("beta", 1, 1)]
+    assert main([*args, "project", "show", "-p", "alpha", "-j"]) == 0
+    shown = json.loads(capsys.readouterr().out)
+    assert shown["project_id"] == "alpha"
+    assert {key: shown[key] for key in ("documents", "concepts", "skills")} == {
+        "documents": 1,
+        "concepts": 0,
+        "skills": 1,
+    }
+    assert main([*args, "project", "show", "-p", "alpha"]) == 0
+    table = capsys.readouterr().out
+    assert "Documents" in table and "Concepts" in table and "Skills" in table
     assert DEFAULT_SKILL_URI in {
         row["uri"] for row in catalog.project_resources(principal, "alpha")
     }

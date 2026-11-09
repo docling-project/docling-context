@@ -599,12 +599,12 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command")
     init = commands.add_parser("init", help="Initialize the local SQLite store")
     init.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table"
+        "-j", "--json", action="store_true", help="Print JSON instead of a table"
     )
     overview = commands.add_parser(
         "overview", help="List projects and linked resource counts"
     )
-    overview.add_argument("--json", action="store_true")
+    overview.add_argument("-j", "--json", action="store_true")
     overview.add_argument("--limit", type=int, default=100)
     overview.add_argument("--offset", type=int, default=0)
     project = commands.add_parser(
@@ -613,26 +613,26 @@ def _parser() -> argparse.ArgumentParser:
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_create = project_commands.add_parser("create", help="Create a project")
     project_create.add_argument(
-        "--project", dest="project_id", required=True, help="Project ID"
+        "-p", "--project", dest="project_id", required=True, help="Project ID"
     )
     project_create.add_argument("--title", required=True)
     project_show = project_commands.add_parser("show", help="Show project details")
     project_show.add_argument(
-        "--project", dest="project_id", required=True, help="Project ID"
+        "-p", "--project", dest="project_id", required=True, help="Project ID"
     )
     for name in ("link", "unlink"):
         command = project_commands.add_parser(
             name, help=f"{'Link' if name == 'link' else 'Unlink'} a shared resource"
         )
         command.add_argument(
-            "--project", dest="project_id", required=True, help="Project ID"
+            "-p", "--project", dest="project_id", required=True, help="Project ID"
         )
-        command.add_argument("--uri", required=True, help="Resource URI")
+        command.add_argument("-u", "--uri", required=True, help="Resource URI")
     project_list = project_commands.add_parser(
         "resources", help="List linked resources"
     )
     project_list.add_argument(
-        "--project", dest="project_id", required=True, help="Project ID"
+        "-p", "--project", dest="project_id", required=True, help="Project ID"
     )
     context = project_commands.add_parser(
         "context", help="Read and generate project context"
@@ -648,23 +648,23 @@ def _parser() -> argparse.ArgumentParser:
         sub.set_defaults(project_command="context-show" if name == "show" else name)
         if name != "worker":
             sub.add_argument(
-                "--project", dest="project_id", required=True, help="Project ID"
+                "-p", "--project", dest="project_id", required=True, help="Project ID"
             )
-        sub.add_argument("--json", action="store_true")
+        sub.add_argument("-j", "--json", action="store_true")
     context_set = context_commands.add_parser(
         "set", help="Set a project context document"
     )
     context_set.add_argument(
-        "--project", dest="project_id", required=True, help="Project ID"
+        "-p", "--project", dest="project_id", required=True, help="Project ID"
     )
     context_set.add_argument("--description", type=Path)
     context_set.add_argument("--abstract", type=Path)
     context_set.add_argument("--overview", type=Path)
-    context_set.add_argument("--json", action="store_true")
+    context_set.add_argument("-j", "--json", action="store_true")
     context_set.set_defaults(project_command="context-set")
     for command in project_commands.choices.values():
         command.add_argument(
-            "--json", action="store_true", help="Print JSON instead of a table"
+            "-j", "--json", action="store_true", help="Print JSON instead of a table"
         )
     library = commands.add_parser(
         "library", help="Import, inspect, and search source documents"
@@ -677,13 +677,13 @@ def _parser() -> argparse.ArgumentParser:
             "create", help=f"Create a named {group} from DCLG or DCLX"
         )
         create.add_argument(
-            "--id", dest="resource_id", required=True, help=f"{group.title()} ID"
+            "-i", "--id", dest="resource_id", required=True, help=f"{group.title()} ID"
         )
         create.add_argument("--from", dest="source", type=Path, required=True)
         create.add_argument(
             "--metadata", type=Path, help="Descriptor JSON; required for DCLG concepts"
         )
-        create.add_argument("--project")
+        create.add_argument("-p", "--project")
         create.set_defaults(command="typed-create", type=kind)
         for name in ("list", "show", "projects", "links", "link"):
             action_help = {
@@ -696,9 +696,10 @@ def _parser() -> argparse.ArgumentParser:
             sub = typed_commands.add_parser(name, help=action_help[name])
             sub.set_defaults(command="typed-inspect", type=kind)
             if name == "list":
-                sub.add_argument("--project")
+                sub.add_argument("-p", "--project")
             else:
                 sub.add_argument(
+                    "-i",
                     "--id",
                     dest="resource_id",
                     required=True,
@@ -710,7 +711,7 @@ def _parser() -> argparse.ArgumentParser:
                 )
                 sub.add_argument("--relation", required=True)
         for sub in typed_commands.choices.values():
-            sub.add_argument("--json", action="store_true")
+            sub.add_argument("-j", "--json", action="store_true")
     knowledge = commands.add_parser(
         "knowledge", help="Manage datasets of cited facts defined by concepts"
     )
@@ -721,26 +722,26 @@ def _parser() -> argparse.ArgumentParser:
         "create", help="Create a dataset from a concept revision"
     )
     knowledge_create.add_argument(
-        "--id", dest="resource_id", required=True, help="Dataset ID"
+        "-i", "--id", dest="resource_id", required=True, help="Dataset ID"
     )
     knowledge_create.add_argument("--concept", required=True)
-    knowledge_create.add_argument("--project")
+    knowledge_create.add_argument("-p", "--project")
     for name, help_text in (
         ("list", "List knowledge datasets"),
         ("show", "Show a dataset's pinned concept and schema"),
     ):
         sub = knowledge_commands.add_parser(name, help=help_text)
         if name == "list":
-            sub.add_argument("--project")
+            sub.add_argument("-p", "--project")
         else:
             sub.add_argument(
-                "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
+                "-u", "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
             )
     knowledge_add = knowledge_commands.add_parser(
         "add-fact", help="Add a schema-checked fact with an exact citation"
     )
     knowledge_add.add_argument(
-        "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
+        "-u", "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
     )
     for field in ("entity-type", "entity-id", "property", "value"):
         knowledge_add.add_argument(f"--{field}", required=True)
@@ -750,14 +751,14 @@ def _parser() -> argparse.ArgumentParser:
         "facts", help="List facts in a knowledge dataset"
     )
     knowledge_facts.add_argument(
-        "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
+        "-u", "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
     )
     knowledge_facts.add_argument("--entity")
     knowledge_facts.add_argument("--property")
     knowledge_add.add_argument("--unit")
     for command in knowledge_commands.choices.values():
         command.add_argument(
-            "--json", action="store_true", help="Print JSON instead of a table"
+            "-j", "--json", action="store_true", help="Print JSON instead of a table"
         )
     index = commands.add_parser(
         "index", help="Inspect or rebuild lexical and vector indexes"
@@ -767,7 +768,7 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="Show lexical and vector index status"
     )
     index_status.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table."
+        "-j", "--json", action="store_true", help="Print JSON instead of a table."
     )
     lex = index_commands.add_parser(
         "lex", help="Inspect or rebuild indexed document nodes"
@@ -777,13 +778,13 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="Show indexed document and node counts"
     )
     lex_status.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table."
+        "-j", "--json", action="store_true", help="Print JSON instead of a table."
     )
     lex_rebuild = lex_commands.add_parser(
         "rebuild", help="Rebuild search records from stored DCLX documents"
     )
     lex_rebuild.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table"
+        "-j", "--json", action="store_true", help="Print JSON instead of a table"
     )
     vector = index_commands.add_parser(
         "vector", help="Inspect or rebuild vector embeddings"
@@ -793,7 +794,7 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="Show vector model and coverage"
     )
     vector_status.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table."
+        "-j", "--json", action="store_true", help="Print JSON instead of a table."
     )
     vector_rebuild = vector_commands.add_parser(
         "rebuild", help="Embed indexed nodes and rebuild the vector snapshot"
@@ -815,7 +816,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Embedding runtime (default: MLX for supported Apple Silicon models, else ONNX).",
     )
     vector_rebuild.add_argument(
-        "--json", action="store_true", help="Print JSON instead of a table"
+        "-j", "--json", action="store_true", help="Print JSON instead of a table"
     )
     add = library_commands.add_parser(
         "add",
@@ -842,7 +843,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="FORMAT",
         help="Include a source format (repeatable; default: all; e.g. pdf, docx, xlsx, image).",
     )
-    add.add_argument("--project", help="Link imported documents to this project")
+    add.add_argument("-p", "--project", help="Link imported documents to this project")
     add.add_argument(
         "--config",
         type=Path,
@@ -900,17 +901,17 @@ def _parser() -> argparse.ArgumentParser:
         "(default: off; failures are skipped and reported at the end).",
     )
     add.add_argument(
-        "--json", action="store_true", help="Print JSON lines instead of a table"
+        "-j", "--json", action="store_true", help="Print JSON lines instead of a table"
     )
     jobs = library_commands.add_parser("jobs", help="Inspect durable ingestion jobs")
     jobs.set_defaults(command="jobs")
     jobs_commands = jobs.add_subparsers(dest="jobs_command", required=True)
     jobs_status = jobs_commands.add_parser("status", help="Show one job by ID")
-    jobs_status.add_argument("--id", dest="job_id", required=True, help="Job ID")
-    jobs_status.add_argument("--json", action="store_true")
+    jobs_status.add_argument("-i", "--id", dest="job_id", required=True, help="Job ID")
+    jobs_status.add_argument("-j", "--json", action="store_true")
     listing = library_commands.add_parser("list", help="List library documents")
     listing.set_defaults(command="library-list")
-    listing.add_argument("--project")
+    listing.add_argument("-p", "--project")
     for name, help_text in (
         ("projects", "List projects linked to a document"),
         ("links", "List a document's resource links"),
@@ -919,6 +920,7 @@ def _parser() -> argparse.ArgumentParser:
         sub = library_commands.add_parser(name, help=help_text)
         sub.set_defaults(command="library-relations")
         sub.add_argument(
+            "-d",
             "--document",
             dest="document_id",
             required=True,
@@ -929,13 +931,14 @@ def _parser() -> argparse.ArgumentParser:
                 "--target", dest="target_uri", required=True, help="Target URI"
             )
             sub.add_argument("--relation", required=True)
-        sub.add_argument("--json", action="store_true")
+        sub.add_argument("-j", "--json", action="store_true")
     listing.add_argument(
-        "--json", action="store_true", help="Print JSON lines instead of a table"
+        "-j", "--json", action="store_true", help="Print JSON lines instead of a table"
     )
     tree = library_commands.add_parser("tree", help="Walk a context subtree")
     tree.set_defaults(command="tree")
     tree.add_argument(
+        "-u",
         "--uri",
         default="docling://resources/library/",
         help="Subtree URI (default: docling://resources/library/).",
@@ -943,45 +946,48 @@ def _parser() -> argparse.ArgumentParser:
     tree.add_argument("-L", "--depth", type=int, default=2)
     tree_output = tree.add_mutually_exclusive_group()
     tree_output.add_argument(
-        "--json", action="store_true", help="Print JSON lines instead of a table"
+        "-j", "--json", action="store_true", help="Print JSON lines instead of a table"
     )
     tree_output.add_argument(
         "--raw", action="store_true", help="Print an indented URI tree"
     )
     outline = library_commands.add_parser("outline", help="Read a document TOC sidecar")
     outline.set_defaults(command="outline")
-    outline.add_argument("--uri", required=True, help="Document URI or ID")
+    outline.add_argument("-u", "--uri", required=True, help="Document URI or ID")
     outline.add_argument("--revision", help="Immutable document revision")
     outline_output = outline.add_mutually_exclusive_group()
-    outline_output.add_argument("--json", action="store_true")
+    outline_output.add_argument("-j", "--json", action="store_true")
     outline_output.add_argument("--raw", action="store_true", help="Print TOC XML only")
     show = library_commands.add_parser("show", help="Read one cited DocLang node")
     show.set_defaults(command="show")
-    show.add_argument("--uri", required=True, help="Document URI or ID")
-    show.add_argument("--xpath", required=True, help="DocLang node XPath")
+    show.add_argument("-u", "--uri", required=True, help="Document URI or ID")
+    show.add_argument("-x", "--xpath", required=True, help="DocLang node XPath")
     show.add_argument("--revision", help="Immutable document revision")
     show.add_argument("--format", choices=("text", "xml"), default="text")
     show.add_argument("--max-chars", type=int, default=8_192)
     show_output = show.add_mutually_exclusive_group()
-    show_output.add_argument("--json", action="store_true")
+    show_output.add_argument("-j", "--json", action="store_true")
     show_output.add_argument(
         "--raw", action="store_true", help="Print node content only"
     )
     for name in ("find", "grep"):
         search = library_commands.add_parser(name, help="Bounded lexical lookup")
         search.set_defaults(command=name)
-        search.add_argument("--project")
+        search.add_argument("-p", "--project")
         search.add_argument("--term", required=True, help="Literal search term")
-        search.add_argument("--uri", default="docling://resources/")
+        search.add_argument("-u", "--uri", default="docling://resources/")
         search.add_argument(
-            "--json", action="store_true", help="Print JSON lines instead of a table"
+            "-j",
+            "--json",
+            action="store_true",
+            help="Print JSON lines instead of a table",
         )
     retrieval = library_commands.add_parser(
         "search", help="Search indexed DocLang nodes with exact citations"
     )
     retrieval.set_defaults(command="search")
     retrieval.add_argument(
-        "--query", default="", help="Query text (optional with --image)."
+        "-q", "--query", default="", help="Query text (optional with --image)."
     )
     retrieval.add_argument(
         "--image", type=Path, help="Image query file (vector mode only)."
@@ -993,18 +999,21 @@ def _parser() -> argparse.ArgumentParser:
         help="Search mode (default: hybrid if vectors exist, else lexical).",
     )
     retrieval.add_argument(
+        "-u",
         "--uri",
         default="docling://resources/library/",
         help="Authorized URI subtree (default: shared library).",
     )
     retrieval.add_argument(
-        "--project", help="Search only resources linked to this project"
+        "-p", "--project", help="Search only resources linked to this project"
     )
     retrieval.add_argument(
-        "--document", help="Restrict to one document URI (default: all in scope)."
+        "-d", "--document", help="Restrict to one document URI (default: all in scope)."
     )
     retrieval.add_argument(
-        "--xpath", help="Restrict to one source XPath subtree (default: all nodes)."
+        "-x",
+        "--xpath",
+        help="Restrict to one source XPath subtree (default: all nodes).",
     )
     retrieval.add_argument(
         "--tier",
@@ -1029,6 +1038,7 @@ def _parser() -> argparse.ArgumentParser:
         help="Maximum tokens per citation (default: 500).",
     )
     retrieval.add_argument(
+        "-j",
         "--json",
         action="store_true",
         help="Print complete JSON records instead of the compact table (default: table).",
@@ -1039,9 +1049,13 @@ def _parser() -> argparse.ArgumentParser:
     session_start = session_commands.add_parser(
         "start", help="Launch an agent in a project session"
     )
-    session_start.add_argument("--id", help="Session ID (default: generated UUID)")
-    session_start.add_argument("--project", required=True, help="Owning project ID")
-    session_start.add_argument("--agent", choices=AGENTS, required=True)
+    session_start.add_argument(
+        "-i", "--id", help="Session ID (default: generated UUID)"
+    )
+    session_start.add_argument(
+        "-p", "--project", required=True, help="Owning project ID"
+    )
+    session_start.add_argument("-a", "--agent", choices=AGENTS, required=True)
     session_start.add_argument(
         "--no-launch",
         action="store_true",
@@ -1050,7 +1064,9 @@ def _parser() -> argparse.ArgumentParser:
     session_list = session_commands.add_parser(
         "list", help="List user sessions or sessions in a project"
     )
-    session_list.add_argument("--project", help="List sessions owned by this project")
+    session_list.add_argument(
+        "-p", "--project", help="List sessions owned by this project"
+    )
     session_list.add_argument(
         "--status",
         choices=("open", "closed"),
@@ -1073,15 +1089,20 @@ def _parser() -> argparse.ArgumentParser:
         action = "List compilation jobs for" if name == "jobs" else f"{name.title()}"
         command = session_commands.add_parser(name, help=f"{action} one session")
         command.add_argument(
-            "--id", dest="session_id", required=True, help="Session ID or full URI"
+            "-i",
+            "--id",
+            dest="session_id",
+            required=True,
+            help="Session ID or full URI",
         )
         command.add_argument(
-            "--json", action="store_true", help="Print JSON instead of a table"
+            "-j", "--json", action="store_true", help="Print JSON instead of a table"
         )
     session_append = session_commands.add_parser(
         "append", help="Append one session event"
     )
     session_append.add_argument(
+        "-i",
         "--id",
         dest="session_id",
         help="Session ID or full URI (default: DOCLING_CONTEXT_SESSION)",
@@ -1111,22 +1132,22 @@ def _parser() -> argparse.ArgumentParser:
         "trim", help="Retain recent session events"
     )
     session_trim.add_argument(
-        "--id", dest="session_id", required=True, help="Session ID or full URI"
+        "-i", "--id", dest="session_id", required=True, help="Session ID or full URI"
     )
     session_trim.add_argument("--keep-last", type=int, required=True)
     session_attachment = session_commands.add_parser(
         "attachment", help="Save one event attachment"
     )
     session_attachment.add_argument(
-        "--id", dest="session_id", required=True, help="Session ID or full URI"
+        "-i", "--id", dest="session_id", required=True, help="Session ID or full URI"
     )
     session_attachment.add_argument(
         "--key", required=True, help="Idempotency key of the attached event"
     )
     session_attachment.add_argument("--output", type=Path, required=True)
-    session_attachment.add_argument("--json", action="store_true")
+    session_attachment.add_argument("-j", "--json", action="store_true")
     for command in (session_start, session_list, session_append, session_trim):
-        command.add_argument("--json", action="store_true")
+        command.add_argument("-j", "--json", action="store_true")
 
     memory = commands.add_parser("memory", help="Review and recall durable memories")
     memory_commands = memory.add_subparsers(dest="memory_command", required=True)
@@ -1165,22 +1186,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     for command in (memory_list, memory_proposals):
         command.add_argument(
-            "--json", action="store_true", help="Print JSON instead of a table"
+            "-j", "--json", action="store_true", help="Print JSON instead of a table"
         )
     for name in ("show", "accept", "reject", "delete", "purge"):
         command = memory_commands.add_parser(name, help=f"{name.title()} one memory")
-        command.add_argument("--uri", required=True, help="Memory URI")
-        command.add_argument("--json", action="store_true")
+        command.add_argument("-u", "--uri", required=True, help="Memory URI")
+        command.add_argument("-j", "--json", action="store_true")
         if name in {"reject", "delete"}:
             command.add_argument("--reason", default="")
     memory_correct = memory_commands.add_parser(
         "correct", help="Write an accepted correction"
     )
-    memory_correct.add_argument("--uri", required=True, help="Memory URI")
+    memory_correct.add_argument("-u", "--uri", required=True, help="Memory URI")
     memory_correct.add_argument("--claim", help="Corrected claim, or use --stdin")
     memory_correct.add_argument("--stdin", action="store_true")
     memory_correct.add_argument("--explanation")
-    memory_correct.add_argument("--json", action="store_true")
+    memory_correct.add_argument("-j", "--json", action="store_true")
     memory_create = memory_commands.add_parser(
         "create", help="Create a user-authored claim"
     )
@@ -1203,35 +1224,39 @@ def _parser() -> argparse.ArgumentParser:
     )
     for field in ("uri", "document_id", "revision_id", "xpath"):
         memory_create.add_argument(f"--source-{field.replace('_', '-')}")
-    memory_create.add_argument("--json", action="store_true")
+    memory_create.add_argument("-j", "--json", action="store_true")
     memory_search = memory_commands.add_parser("search", help="Search accepted claims")
-    memory_search.add_argument("--query", default="", help="Query text")
+    memory_search.add_argument("-q", "--query", default="", help="Query text")
     memory_search.add_argument("--limit", type=int, default=10)
-    memory_search.add_argument("--json", action="store_true")
+    memory_search.add_argument("-j", "--json", action="store_true")
     memory_recall = memory_commands.add_parser(
         "recall", help="Recall claims once per session revision"
     )
-    memory_recall.add_argument("--query", default="", help="Query text")
-    memory_recall.add_argument("--session", help="ID or DOCLING_CONTEXT_SESSION")
+    memory_recall.add_argument("-q", "--query", default="", help="Query text")
+    memory_recall.add_argument("-s", "--session", help="ID or DOCLING_CONTEXT_SESSION")
     memory_recall.add_argument("--limit", type=int, default=10)
-    memory_recall.add_argument("--json", action="store_true")
+    memory_recall.add_argument("-j", "--json", action="store_true")
     memory_worker = memory_commands.add_parser(
         "worker", help="Process queued memory compilation jobs"
     )
     memory_worker.add_argument(
         "--once", action="store_true", help="Process one due job then exit"
     )
-    memory_worker.add_argument("--json", action="store_true")
+    memory_worker.add_argument("-j", "--json", action="store_true")
     memory_jobs = memory_commands.add_parser(
         "jobs", help="List compilation jobs for a session"
     )
     memory_jobs.add_argument(
-        "--session", dest="session_id", required=True, help="Session ID or full URI"
+        "-s",
+        "--session",
+        dest="session_id",
+        required=True,
+        help="Session ID or full URI",
     )
     memory_jobs.add_argument("--limit", type=int, default=100)
-    memory_jobs.add_argument("--json", action="store_true")
+    memory_jobs.add_argument("-j", "--json", action="store_true")
     for sub in (memory_list, memory_create, memory_search, memory_recall):
-        sub.add_argument("--project")
+        sub.add_argument("-p", "--project")
     agent = commands.add_parser(
         "agent", help="Install the dc skill and MCP tools in an agent"
     )
@@ -1242,13 +1267,13 @@ def _parser() -> argparse.ArgumentParser:
         ("remove", "Remove the managed skill and MCP connection"),
     ):
         sub = agent_commands.add_parser(action, help=help_text)
-        sub.add_argument("--agent", choices=AGENTS, required=True)
+        sub.add_argument("-a", "--agent", choices=AGENTS, required=True)
         sub.add_argument("--scope", choices=("user", "project"), default="user")
         sub.add_argument("--project-root", type=Path, default=Path.cwd())
         sub.add_argument(
             "--home", type=Path, default=Path.home(), help=argparse.SUPPRESS
         )
-        sub.add_argument("--json", action="store_true")
+        sub.add_argument("-j", "--json", action="store_true")
     return parser
 
 
@@ -1865,7 +1890,7 @@ def main(argv: list[str] | None = None) -> int:
                         )
                     elif args.project_command == "show":
                         _status(
-                            asdict(catalog.get_project(principal, args.project_id)),
+                            catalog.project_summary(principal, args.project_id),
                             json_output=args.json,
                         )
                     elif args.project_command == "resources":

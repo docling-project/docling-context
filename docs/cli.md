@@ -24,6 +24,20 @@ uv run dc session start --project materials --agent codex
 
 The top level has one route for each kind of work: `init`, `overview`, `project`, `library`, `session`, `memory`, `concept`, `skill`, `knowledge`, `index`, and `agent`. Use `dc COMMAND --help` to inspect options. Agent and script callers can add `--json` to individual commands.
 
+Every value is passed by name; only command names are positional. Options that recur across commands have one-letter forms with the same meaning everywhere:
+
+| Short | Long |
+| --- | --- |
+| `-p` | `--project` |
+| `-u` | `--uri` |
+| `-d` | `--document` |
+| `-i` | `--id` |
+| `-x` | `--xpath` |
+| `-q` | `--query` |
+| `-s` | `--session` |
+| `-a` | `--agent` |
+| `-j` | `--json` |
+
 To see every command and nested subcommand at once, run `uv run python scripts/dump_cli_tree.py`. Add `--show-options` to include their arguments. The script reads the CLI parser, so the tree follows command changes.
 
 ## `init` and `overview`
@@ -42,14 +56,14 @@ Projects define topics and membership. Every project links the shared `doclang-a
 
 | Subcommand | Use |
 | --- | --- |
-| `create ID --title TITLE` | Create a project. |
-| `show ID` | Read its title and context URIs. |
-| `resources ID` | List its linked library documents, memories, skills, concepts, and knowledge datasets. |
-| `link ID URI` / `unlink ID URI` | Change membership. |
-| `context set ID --description FILE` | Set a DCLG or DCLX description; `--abstract` and `--overview` also work. |
-| `context show ID` | Read its context documents. |
-| `context refresh ID` | Queue regeneration of the abstract and overview inventory. |
-| `context jobs ID` / `context worker` | Inspect or process regeneration jobs. |
+| `create -p ID --title TITLE` | Create a project. |
+| `show -p ID` | Read its title, context URIs, and counts of linked documents, memories, skills, concepts, knowledge datasets, and sessions. |
+| `resources -p ID` | List its linked library documents, memories, skills, concepts, and knowledge datasets. |
+| `link -p ID -u URI` / `unlink -p ID -u URI` | Change membership. |
+| `context set -p ID --description FILE` | Set a DCLG or DCLX description; `--abstract` and `--overview` also work. |
+| `context show -p ID` | Read its context documents. |
+| `context refresh -p ID` | Queue regeneration of the abstract and overview inventory. |
+| `context jobs -p ID` / `context worker` | Inspect or process regeneration jobs. |
 
 ```sh
 uv run dc project create --project oilgas --title 'Oil and Gas'
@@ -67,16 +81,16 @@ The library owns original source documents and their discovery. Imported content
 
 | Subcommand | Use |
 | --- | --- |
-| `add SOURCE` | Import a local file, folder, or HTTP(S) URL. Use `-r` for nested folders. |
+| `add --source SOURCE` | Import a local file, folder, or HTTP(S) URL. Use `-r` for nested folders. |
 | `list [--project ID]` | List source documents. |
-| `projects ID` | List projects linked to a document. |
-| `links ID` / `link ID TARGET_URI --relation NAME` | Inspect or create document relationships. |
-| `tree [URI]` | Walk a URI subtree. |
-| `outline ID` | Read a document's table of contents. |
-| `show ID XPATH` | Read one cited node. Full URIs also work. |
-| `find TERM` / `grep TERM` | Bounded substring lookup. `find` ranks by occurrence count; `grep` keeps scan order. |
-| `search QUERY` | Indexed lexical, vector, or hybrid search with exact citations. |
-| `jobs status JOB_ID` | Inspect an asynchronous ingestion job created by an agent or API. |
+| `projects -d ID` | List projects linked to a document. |
+| `links -d ID` / `link -d ID --target URI --relation NAME` | Inspect or create document relationships. |
+| `tree [-u URI]` | Walk a URI subtree. |
+| `outline -u ID` | Read a document's table of contents. |
+| `show -u ID -x XPATH` | Read one cited node. Full URIs also work. |
+| `find --term TERM` / `grep --term TERM` | Bounded substring lookup. `find` ranks by occurrence count; `grep` keeps scan order. |
+| `search -q QUERY` | Indexed lexical, vector, or hybrid search with exact citations. |
+| `jobs status -i JOB_ID` | Inspect an asynchronous ingestion job created by an agent or API. |
 
 ```sh
 uv run dc library add --source ./papers -r --project oilgas
@@ -97,12 +111,12 @@ One session command family handles both interactive and manual sessions. `start`
 
 | Subcommand | Use |
 | --- | --- |
-| `start --project ID --agent NAME` | Launch Codex, Claude, Hermes, or Pi. |
+| `start -p ID -a NAME` | Launch Codex, Claude, Hermes, or Pi. |
 | `list [--project ID]` | List sessions and their agent and state. |
-| `show ID` / `replay ID` | Inspect session metadata or events. |
-| `append ID TEXT --kind KIND --key KEY` | Save an event with a stable key. |
-| `close ID` | Close the session and queue memory compilation. |
-| `jobs ID` | Inspect memory compilation jobs. |
+| `show -i ID` / `replay -i ID` | Inspect session metadata or events. |
+| `append -i ID --text TEXT --kind KIND --key KEY` | Save an event with a stable key. |
+| `close -i ID` | Close the session and queue memory compilation. |
+| `jobs -i ID` | Inspect memory compilation jobs. |
 | `trim`, `attachment`, `delete`, `purge` | Manage events and lifecycle. |
 
 ```sh
@@ -122,10 +136,10 @@ A memory is a durable conclusion or synthesis. Session compilation can propose o
 | Subcommand | Use |
 | --- | --- |
 | `create [KIND] CLAIM [--project ID]` | Create a proposed memory; `--accepted` accepts a user-authored claim immediately. |
-| `create --from FILE [--project ID]` | Create from DCLG/DCLX. |
+| `create --from FILE [-p ID]` | Create from DCLG/DCLX. |
 | `list [--project ID]` / `show ID` | Inspect memories and review state. |
 | `proposals`, `accept`, `reject`, `correct` | Review or correct a memory. |
-| `search QUERY [--project ID]` / `recall QUERY [--project ID]` | Find accepted conclusions; recall suppresses repeats per session. |
+| `search -q QUERY [-p ID]` / `recall -q QUERY [-p ID]` | Find accepted conclusions; recall suppresses repeats per session. |
 | `worker --once` / `jobs SESSION_ID` | Process or inspect compilation. |
 | `delete` / `purge` | Remove a memory or its history. |
 
@@ -183,10 +197,10 @@ A knowledge dataset contains individually cited facts in SQLite and a DCLX descr
 
 | Subcommand | Use |
 | --- | --- |
-| `create ID --concept CONCEPT_ID [--project ID]` | Create a dataset using a validated concept. |
-| `show ID` / `list [--project ID]` | Inspect the pinned concept and datasets. |
-| `add-fact ID ENTITY_TYPE ENTITY_ID PROPERTY JSON_VALUE` | Validate and store one fact with an exact citation. Supply `--unit` when the property defines one. |
-| `facts ID [--entity ENTITY_ID] [--property NAME]` | List or filter cited facts. |
+| `create -i ID --concept CONCEPT_ID [-p ID]` | Create a dataset using a validated concept. |
+| `show -u ID` / `list [-p ID]` | Inspect the pinned concept and datasets. |
+| `add-fact -u ID --entity-type TYPE --entity-id ID --property NAME --value JSON` | Validate and store one fact with an exact citation. Supply `--unit` when the property defines one. |
+| `facts -u ID [--entity ENTITY_ID] [--property NAME]` | List or filter cited facts. |
 
 ```sh
 uv run dc knowledge create --id khurmala-properties --concept formation-properties --project oilgas

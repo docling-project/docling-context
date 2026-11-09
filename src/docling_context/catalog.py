@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any, Self
 from xml.sax.saxutils import escape
 
@@ -586,6 +586,19 @@ class Catalog:
     ) -> list[dict[str, Any]]:
         if not 1 <= limit <= 1000 or offset < 0:
             raise ValueError("overview limit or offset is out of bounds")
+        return self._project_counts(principal, None, limit, offset)
+
+    def project_summary(self, principal: Principal, project_id: str) -> dict[str, Any]:
+        """Return the project record plus counts of its linked resources."""
+        project = self.get_project(principal, project_id)
+        counts = self._project_counts(principal, project.project_id, 1, 0)[0]
+        counts.pop("project_id")
+        counts.pop("title")
+        return {**asdict(project), **counts}
+
+    def _project_counts(
+        self, principal: Principal, project_id: str | None, limit: int, offset: int
+    ) -> list[dict[str, Any]]:
         rows = self.db.execute(
             """SELECT p.project_id,p.title,
                  count(CASE WHEN l.resource_type='library' THEN 1 END) AS documents,
@@ -596,12 +609,13 @@ class Catalog:
                  (SELECT count(*) FROM dc_project_sessions s
                   WHERE s.tenant_id=p.tenant_id AND s.project_id=p.project_id) AS sessions
                FROM (SELECT * FROM dc_projects WHERE tenant_id=?
+                       AND (? IS NULL OR project_id=?)
                      ORDER BY lower(title),project_id LIMIT ? OFFSET ?) p
                LEFT JOIN dc_project_resource_links l
                  ON l.tenant_id=p.tenant_id AND l.project_id=p.project_id
                GROUP BY p.tenant_id,p.project_id,p.title
                ORDER BY lower(p.title),p.project_id""",
-            (principal.tenant_id, limit, offset),
+            (principal.tenant_id, project_id, project_id, limit, offset),
         ).fetchall()
         return [dict(row) for row in rows]
 

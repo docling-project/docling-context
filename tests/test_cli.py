@@ -444,3 +444,36 @@ def test_cli_has_no_positional_arguments():
                 yield f"dc {' '.join(path)} <{action.dest}>"
 
     assert list(positionals(cli_module._parser(), [])) == []
+
+
+def test_repeated_options_share_consistent_short_flags():
+    """A short flag always means the same long option across the whole CLI."""
+    import argparse
+
+    expected = {
+        "-a": "--agent",
+        "-d": "--document",
+        "-i": "--id",
+        "-j": "--json",
+        "-p": "--project",
+        "-q": "--query",
+        "-s": "--session",
+        "-u": "--uri",
+        "-x": "--xpath",
+    }
+    seen: dict[str, set[str]] = {}
+
+    def walk(parser):
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for sub in action.choices.values():
+                    walk(sub)
+                continue
+            longs = [o for o in action.option_strings if o.startswith("--")]
+            shorts = [o for o in action.option_strings if len(o) == 2]
+            for long in longs:
+                seen.setdefault(long, set()).update(shorts)
+
+    walk(cli_module._parser())
+    for short, long in expected.items():
+        assert seen[long] == {short}, long

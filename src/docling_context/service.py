@@ -292,7 +292,7 @@ class ContextService:
 
     def project_show(self, request: ProjectRequest) -> ServiceResult[dict[str, Any]]:
         return self._result(
-            asdict(Catalog(self.store).get_project(self.principal, request.project_id))
+            Catalog(self.store).project_summary(self.principal, request.project_id)
         )
 
     def project_resources(
