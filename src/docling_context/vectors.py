@@ -32,6 +32,29 @@ class VectorIndex(Protocol):
     def rebuild(self) -> None: ...
 
 
+class VectorStorageUnavailable(ValueError):
+    """The saved vector projection cannot be searched."""
+
+
+_BUILD_HINT = "Run 'dc index vector rebuild' to build vector storage."
+
+
+def verified_vector_state(store: LocalContextStore):
+    """Check the saved snapshot before loading a potentially costly model."""
+    state = store.db.execute("SELECT * FROM vector_state WHERE singleton=1").fetchone()
+    if state is None:
+        raise VectorStorageUnavailable(f"Vector storage does not exist. {_BUILD_HINT}")
+    path = store.root / f"vectors-{state['generation']}.tvim"
+    try:
+        if hashlib.sha256(path.read_bytes()).hexdigest() != state["snapshot_hash"]:
+            raise VectorStorageUnavailable(f"Vector storage is corrupt. {_BUILD_HINT}")
+    except OSError as exc:
+        raise VectorStorageUnavailable(
+            f"Vector storage is missing. {_BUILD_HINT}"
+        ) from exc
+    return state
+
+
 class TurbovecIndex:
     """IdMapIndex snapshot; SQLite embeddings and DCLX remain authoritative."""
 
@@ -41,8 +64,11 @@ class TurbovecIndex:
         provider: EmbeddingProvider,
         *,
         force_rebuild: bool = False,
+        search_only: bool = False,
         progress: Callable[[int, int], None] | None = None,
     ):
+        if search_only and not force_rebuild:
+            verified_vector_state(store)
         try:
             import numpy as np
             from turbovec import IdMapIndex  # type: ignore[import-untyped]
@@ -63,10 +89,67 @@ class TurbovecIndex:
         self.index = IdMapIndex(dim=provider.dimensions, bit_width=4)
         self.generation = ""
         self._progress = progress
+        self.search_only = search_only
+        self._snapshot_hash = ""
         if force_rebuild:
             self.rebuild()
+        elif search_only:
+            self._load_existing()
         else:
             self._restore_or_rebuild()
+
+    def _load_existing(self) -> None:
+        state = verified_vector_state(self.store)
+        if (state["model_id"], state["dimensions"], state["normalization"]) != (
+            self.provider.model_id,
+            self.provider.dimensions,
+            "l2",
+        ):
+            raise VectorStorageUnavailable(
+                f"Vector model does not match storage. {_BUILD_HINT}"
+            )
+        try:
+            loaded = self.index_type.load(str(self._path(state["generation"])))
+            if loaded.dim != self.provider.dimensions:
+                raise ValueError("vector dimensions differ")
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise VectorStorageUnavailable(
+                f"Vector storage cannot be loaded. {_BUILD_HINT}"
+            ) from exc
+        self.index = loaded
+        self.generation = state["generation"]
+        self._snapshot_hash = state["snapshot_hash"]
+
+    def warning(self, tenant_id: str) -> str | None:
+        """Describe a saved projection that omits current searchable units."""
+        state = self.store.db.execute(
+            "SELECT outbox_offset FROM vector_state WHERE singleton=1"
+        ).fetchone()
+        incomplete = state is None or state["outbox_offset"] != self._offset()
+        if not incomplete:
+            incomplete = (
+                self.store.db.execute(
+                    """SELECT 1 FROM retrieval_units r JOIN documents d
+                   ON d.tenant_id=r.tenant_id AND d.uri=r.uri
+                   WHERE r.tenant_id=? AND d.available=1
+                     AND d.revision_id=r.revision_id
+                     AND (trim(r.text)<>'' OR (? AND r.asset_path IS NOT NULL))
+                     AND NOT EXISTS (SELECT 1 FROM vector_members m
+                       WHERE m.generation=? AND m.vector_id=r.vector_id)
+                   LIMIT 1""",
+                    (
+                        tenant_id,
+                        bool(getattr(self.provider, "supports_images", False)),
+                        self.generation,
+                    ),
+                ).fetchone()
+                is not None
+            )
+        return (
+            f"Vector storage is incomplete or stale. {_BUILD_HINT}"
+            if incomplete
+            else None
+        )
 
     def _offset(self) -> int:
         return self.store.db.execute(
@@ -229,6 +312,14 @@ class TurbovecIndex:
         self._path(state["generation"]).unlink(missing_ok=True)
 
     def refresh(self) -> None:
+        if self.search_only:
+            state = verified_vector_state(self.store)
+            if (state["generation"], state["snapshot_hash"]) != (
+                self.generation,
+                self._snapshot_hash,
+            ):
+                self._load_existing()
+            return
         state = self.store.db.execute(
             "SELECT outbox_offset,generation FROM vector_state WHERE singleton=1"
         ).fetchone()

@@ -7,7 +7,7 @@ import io
 from zipfile import ZipFile
 
 import pytest
-from doclang import DoclangDocument, DocLangXDocument
+from doclang import DoclangDocument, DocLangXDocument, DocLangXDocumentRole
 
 from docling_context import (
     AccessDenied,
@@ -37,8 +37,9 @@ def package(text: str = "Body") -> bytes:
     assert document.read_xml(f'<doclang version="0.7"><text>{text}</text></doclang>')
     document.set_part_bytes("assets/keep.bin", b"opaque", "application/octet-stream")
     document.set_part_text("context/source.json", '{"id":1}', "application/json")
-    assert document.set_document_summary(
-        "<doclang><text>Short summary</text></doclang>"
+    assert document.set(
+        DocLangXDocumentRole.SUMMARY,
+        DoclangDocument("<doclang><text>Short summary</text></doclang>"),
     )
     return document.write_bytes()
 
@@ -55,7 +56,8 @@ def test_doclang_native_smoke_and_package_round_trip():
     restored = DocLangXDocument()
     assert restored.read_bytes(rewritten)
     assert restored.at(xpath=XPATH) == "Body"
-    assert restored.summary().at(xpath=XPATH) == "Short summary"
+    summary = restored.get(DocLangXDocumentRole.SUMMARY)
+    assert summary is not None and summary.at(xpath=XPATH) == "Short summary"
     with ZipFile(io.BytesIO(rewritten)) as archive:
         assert archive.read("document.xml").startswith(b"<?xml")
         assert archive.read("assets/keep.bin") == b"opaque"
@@ -241,4 +243,7 @@ def test_multibyte_nodes_survive_native_byte_boundaries(tmp_path):
         record = Ingestor(store).add_resource(
             ALICE, URI, xml.encode(), filename="multibyte.dclg"
         )
-        assert store.get_document(ALICE, record.uri).summary() is not None
+        assert (
+            store.get_document(ALICE, record.uri).get(DocLangXDocumentRole.SUMMARY)
+            is not None
+        )

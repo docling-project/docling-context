@@ -16,6 +16,7 @@ from threading import RLock
 from typing import Any
 
 from .catalog import Catalog
+from .doclang_authoring import get_outline, get_summary, outline_links
 from .durable_memory import MemoryService
 from .ingest_queue import IngestQueue
 from .local import LocalContextStore, RecordMissing
@@ -170,6 +171,7 @@ class SessionAppendRequest:
 class ProjectSessionRequest:
     project_id: str
     session_id: str
+    agent: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,13 +391,10 @@ class ContextService:
         from .package import load_package
 
         document = load_package(self.store.packages.get(record.package.sha256))
-        toc = document.toc()
+        toc = get_outline(document)
         links = []
         if toc is not None:
-            for entry in ET.fromstring(toc.xml()).iter("entry"):
-                target = entry.get("xpath")
-                if target:
-                    links.append(target)
+            links.extend(outline_links(toc.xml()))
         xml = toc.xml() if toc is not None else ""
         return self._result(
             {
@@ -427,7 +426,9 @@ class ContextService:
             from .package import load_package
 
             document = load_package(self.store.packages.get(record.package.sha256))
-            part = document.summary() if sidecar == "summary" else document.toc()
+            part = (
+                get_summary(document) if sidecar == "summary" else get_outline(document)
+            )
             if part is None:
                 raise ServiceError("stale_citation", "sidecar is unavailable")
             selected_xml = _xml_node(part.xml(), xpath)
@@ -484,15 +485,12 @@ class ContextService:
         retriever = Retriever(self.store)
         if request.mode in {"vector", "hybrid"}:
             from .embeddings import stored_embedding_provider
+            from .vectors import VectorStorageUnavailable, verified_vector_state
 
-            state = self.store.db.execute(
-                "SELECT model_id FROM vector_state WHERE singleton=1"
-            ).fetchone()
-            if state is None:
-                raise ServiceError(
-                    "unsupported_provider",
-                    "vector search needs a configured embedding provider",
-                )
+            try:
+                state = verified_vector_state(self.store)
+            except VectorStorageUnavailable as exc:
+                raise ServiceError("vector_index_unavailable", str(exc)) from exc
             self.store.require_exclusive_vector_scope(self.principal)
             retriever = Retriever(
                 self.store, embedder=stored_embedding_provider(state["model_id"])
@@ -528,6 +526,7 @@ class ContextService:
                 "total_hits": result.total_hits,
                 "tokens_used": result.tokens_used,
                 "truncated": result.truncated,
+                "warnings": list(result.warnings),
                 "elapsed_ms": round((time.monotonic() - started) * 1_000),
             }
         )
@@ -578,9 +577,19 @@ class ContextService:
     def project_session_start(
         self, request: ProjectSessionRequest
     ) -> ServiceResult[dict[str, Any]]:
-        Catalog(self.store).get_project(self.principal, request.project_id)
+        if not request.agent:
+            raise ValueError("agent is required for a project session")
+        catalog = Catalog(self.store)
+        catalog.get_project(self.principal, request.project_id)
         uri = f"docling://projects/{request.project_id}/sessions/{request.session_id}"
-        return self._result(asdict(SessionStore(self.store).start(self.principal, uri)))
+        session = SessionStore(self.store).start(self.principal, uri)
+        catalog.register_session(
+            self.principal,
+            request.project_id,
+            request.session_id,
+            agent=request.agent,
+        )
+        return self._result(asdict(session))
 
     def project_session_close(
         self, request: ProjectSessionRequest

@@ -16,8 +16,8 @@ docling://
 │   └── knowledge/{knowledge_id} structured knowledge descriptors
 ├── projects/{project_id}/
 │   ├── .description.dclx      optional short description
-│   ├── .abstract.dclx         L0 relevance check
-│   ├── .overview.dclx         L1 structure and key points
+│   ├── .abstract.dclx         title, description, and linked counts
+│   ├── .overview.dclx         linked resource inventory
 │   └── sessions/{session_id}
 └── user/{user_id}/
 ```
@@ -25,7 +25,9 @@ docling://
 Each resource type is a flat list. Project membership and typed relationships
 between resources live in SQLite. `dc overview` shows every project and counts
 its linked documents, memories, skills, concepts, knowledge descriptors, and
-sessions. Project context documents do not count as linked resources.
+sessions. Each project starts with the shared `doclang-authoring` skill linked,
+so a new project's skill count is one. Project context documents do not count
+as linked resources.
 
 ## 5 minutes to fun
 
@@ -35,23 +37,31 @@ Install Python 3.12+ and `uv`, then run from this repository:
 uv sync --extra conversion
 uv run dc init
 uv run dc project create materials --title "Materials research"
-uv run dc add-resource ./paper.pdf --project materials
+uv run dc library add ./paper.pdf --project materials
 uv run dc overview
-uv run dc search "material properties" --project materials
+uv run dc library search "material properties" --project materials
 ```
 
-`add-resource` prints the canonical library URI and revision. It checks the
-source binary hash first and reuses the existing library document on a repeat
-import. Search results include URI, revision ID, and XPath. Read a result with
-`uv run dc outline URI` and `uv run dc show URI XPATH --revision REVISION_ID`.
+You can import a document directly from an HTTP(S) URL, including PDF URLs
+without a `.pdf` suffix:
+
+```bash
+uv run dc library add https://arxiv.org/pdf/2608.23083 --project materials
+```
+
+`library add` prints the canonical library URI and revision. It checks the
+source binary hash and reuses the existing library document on a repeat import,
+whether the source is a local file or a URL. Search results include URI,
+revision ID, and XPath. Read a result with
+`uv run dc library outline URI` and `uv run dc library show URI XPATH --revision REVISION_ID`.
 Add `--json` to commands when an agent or script needs structured output.
 
 If you have no PDF, use a native DocLang source without the conversion extra:
 
 ```bash
 printf '<doclang><text>Basalt is an igneous rock.</text></doclang>' > basalt.dclg
-uv run dc add-resource ./basalt.dclg --project materials
-uv run dc search basalt --project materials
+uv run dc library add ./basalt.dclg --project materials
+uv run dc library search basalt --project materials
 ```
 
 The default store is `~/.local/share/docling-context`. `dc init` creates its
@@ -61,16 +71,25 @@ for the CLI, workers, and MCP server. No PostgreSQL setup is required.
 
 ## Connect an agent
 
-The bundled installer configures a local MCP server for Codex, Claude Code,
-Hermes, or Pi. For example:
+Start an agent inside a project session. The agent runs in your current
+terminal; when it exits, you return to your shell and the session closes:
 
 ```bash
-uv run docling-context integrate codex --scope project
-uv run docling-context doctor codex --scope project
+uv run dc session start --project materials --agent codex
 ```
 
-See [agent installation](agents.md) for all four recipes, supported scopes,
-write tools, and remote deployment.
+Alternatively, install Docling Context's MCP tools and agent skill, then start
+the agent yourself. For Codex, invoke the skill with `$dc`; in Claude Code,
+Hermes, and Pi, use `/dc`:
+
+```bash
+uv run dc agent install codex --scope project
+codex
+```
+
+Both paths support Codex, Claude Code, Hermes, and Pi. See
+[agent installation](agents.md) for all four recipes, scope and command details,
+and remote deployment.
 
 ## Guides
 

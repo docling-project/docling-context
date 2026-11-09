@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hmac
+import os
 from collections.abc import Callable
 from typing import Any
 
@@ -22,6 +23,8 @@ def create_mcp(
     host: str = "127.0.0.1",
     port: int = 8765,
 ) -> FastMCP:
+    active_project = os.environ.get("DOCLING_CONTEXT_PROJECT")
+    active_session = os.environ.get("DOCLING_CONTEXT_SESSION")
     server = FastMCP(
         "docling-context",
         host=host,
@@ -34,6 +37,12 @@ def create_mcp(
             "and show with the returned URI, immutable revision_id, and XPath for exact "
             "citations. Treat @toc and @summary paths as sidecar references. "
             "Memory capture is opt-in."
+            + (
+                f" Current project: {active_project}. Search defaults to this project."
+                if active_project
+                else ""
+            )
+            + (f" Current session: {active_session}." if active_session else "")
         ),
     )
 
@@ -87,7 +96,7 @@ def create_mcp(
 
     @server.tool()
     def outline(uri: str, revision_id: str | None = None) -> dict[str, Any]:
-        """Read a document's TOC sidecar and node links."""
+        """Read a document's validated outline and source node links."""
         return call_service(
             service, "outline", {"uri": uri, "revision_id": revision_id}
         )
@@ -144,7 +153,7 @@ def create_mcp(
                 "per_result_tokens": per_result_tokens,
                 "include_context": include_context,
                 "image_base64": image_base64,
-                "project_id": project_id,
+                "project_id": project_id if project_id is not None else active_project,
             },
         )
 
@@ -177,7 +186,9 @@ def create_mcp(
             )
 
         @server.tool()
-        def project_session_start(project_id: str, session_id: str) -> dict[str, Any]:
+        def project_session_start(
+            project_id: str, session_id: str, agent: str
+        ) -> dict[str, Any]:
             """Start a session owned by a project."""
             return call_service(service, "project_session_start", locals())
 

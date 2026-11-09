@@ -231,15 +231,22 @@ class MemoryService:
         metadata: dict,
         *,
         expected_revision: str | None,
+        source_document: DocLangXDocument | None = None,
     ) -> MemoryRecord:
-        document = DocLangXDocument()
-        xml = (
-            f"<doclang><heading>{escape(metadata['kind'])}</heading>"
-            f"<text>{escape(metadata['claim'])}</text>"
-            f"<text>{escape(metadata['explanation'])}</text></doclang>"
-        )
-        if not document.read_xml(xml):
-            raise ValueError(document.last_error())
+        document = source_document
+        if document is None and expected_revision and metadata.get("authored_document"):
+            previous = self.store.get_document(principal, uri)
+            if validate_memory(previous)["claim"] == metadata["claim"]:
+                document = previous
+        if document is None:
+            document = DocLangXDocument()
+            xml = (
+                f"<doclang><heading>{escape(metadata['kind'])}</heading>"
+                f"<text>{escape(metadata['claim'])}</text>"
+                f"<text>{escape(metadata['explanation'])}</text></doclang>"
+            )
+            if not document.read_xml(xml):
+                raise ValueError(document.last_error())
         document.set_part_text(
             MEMORY_PART, json.dumps(metadata, sort_keys=True), "application/json"
         )
@@ -270,6 +277,7 @@ class MemoryService:
         accepted: bool = False,
         valid_from: str | None = None,
         valid_to: str | None = None,
+        source_document: DocLangXDocument | None = None,
     ) -> MemoryRecord:
         if kind not in MEMORY_KINDS or not isinstance(claim, str) or not claim.strip():
             raise ValueError("invalid memory kind or claim")
@@ -328,7 +336,15 @@ class MemoryService:
             "conflicts": conflicts,
             "history": [{"status": status, "by": author, "at": _now()}],
         }
-        return self._write(principal, uri, metadata, expected_revision=None)
+        if source_document is not None:
+            metadata["authored_document"] = True
+        return self._write(
+            principal,
+            uri,
+            metadata,
+            expected_revision=None,
+            source_document=source_document,
+        )
 
     def transition(
         self, principal: Principal, uri: str, status: str, *, reason: str = ""
@@ -427,6 +443,7 @@ class MemoryService:
         metadata = validate_memory(self.store.get_document(principal, current.uri))
         aliases = metadata.setdefault("claim_aliases", [])
         aliases.append(_claim_key(current.claim))
+        metadata.pop("authored_document", None)
         metadata.update(
             claim=claim.strip(),
             explanation=current.explanation if explanation is None else explanation,
@@ -490,11 +507,24 @@ class MemoryService:
         return changed
 
     def search(
-        self, principal: Principal, query: str = "", *, limit: int = 10
+        self,
+        principal: Principal,
+        query: str = "",
+        *,
+        limit: int = 10,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, ...]:
         if not 1 <= limit <= 100:
             raise ValueError("memory search limit is out of bounds")
         self.reconcile_sources(principal)
+        if project_id:
+            from .catalog import Catalog
+
+            Catalog(self.store).get_project(principal, project_id)
+        if not query.strip() and project_id:
+            return self.list(
+                principal, status="accepted", limit=limit, project_id=project_id
+            )
         if not query.strip():
             rows = self.store.db.execute(
                 """SELECT uri FROM memory_index WHERE tenant_id=?
@@ -505,7 +535,7 @@ class MemoryService:
         result = Retriever(self.store).search(
             principal,
             query,
-            scope=SearchScope(uri=self._prefix(principal)),
+            scope=SearchScope(uri=self._prefix(principal), project_id=project_id),
             mode="lexical",
             k=100,
         )
@@ -532,6 +562,7 @@ class MemoryService:
         until: str | None = None,
         limit: int = 100,
         offset: int = 0,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, ...]:
         """List current claims, including review history, for the current user."""
         if (
@@ -544,6 +575,14 @@ class MemoryService:
         self.reconcile_sources(principal)
         conditions = ["tenant_id=?"]
         params: list[str | int] = [principal.tenant_id]
+        if project_id:
+            from .catalog import Catalog
+
+            Catalog(self.store).get_project(principal, project_id)
+            conditions.append(
+                "uri IN (SELECT r.uri FROM dc_project_resource_links l JOIN dc_resources r USING (tenant_id,resource_type,resource_id) WHERE l.tenant_id=? AND l.project_id=? AND l.resource_type='memories')"
+            )
+            params.extend((principal.tenant_id, project_id))
         for column, value, operator in (
             ("status", status, "="),
             ("kind", kind, "="),
@@ -567,12 +606,13 @@ class MemoryService:
         query: str = "",
         *,
         limit: int = 10,
+        project_id: str | None = None,
     ) -> tuple[MemoryRecord, ...]:
         from .sessions import SessionStore
 
         session_uri = SessionStore.uri(principal, session_id)
         self.store.get_record(principal, session_uri)
-        candidates = self.search(principal, query, limit=100)
+        candidates = self.search(principal, query, limit=100, project_id=project_id)
         delivered = []
         for memory in candidates:
             with self.store.transaction():

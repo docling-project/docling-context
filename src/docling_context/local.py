@@ -81,7 +81,7 @@ class LocalContextStore:
 
     def _migrate(self) -> None:
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > 9:
+        if version > 10:
             raise RuntimeError("database schema is newer than this library")
         if version == 0:
             self.db.executescript(
@@ -316,22 +316,46 @@ class LocalContextStore:
                         "ALTER TABLE ingest_jobs ADD COLUMN project_id TEXT"
                     )
                 self.db.execute("PRAGMA user_version = 9")
-        self._backfill_retrieval()
+        if version < 10:
+            with self.transaction():
+                self.db.execute(
+                    """CREATE TABLE IF NOT EXISTS lexical_state (
+                         tenant_id TEXT NOT NULL, uri TEXT NOT NULL,
+                         revision_id TEXT NOT NULL, unit_count INTEGER NOT NULL,
+                         PRIMARY KEY (tenant_id, uri),
+                         FOREIGN KEY (tenant_id, uri)
+                           REFERENCES documents (tenant_id, uri) ON DELETE CASCADE)"""
+                )
+                self.db.execute("PRAGMA user_version = 10")
 
-    def _backfill_retrieval(self) -> None:
+    def lexical_stale_uris(self, principal: Principal) -> tuple[str, ...]:
+        """Find visible documents whose current lexical projection is incomplete."""
         rows = self.db.execute(
-            """SELECT d.* FROM documents d WHERE d.available=1 AND NOT EXISTS (
-                 SELECT 1 FROM retrieval_units r WHERE r.tenant_id=d.tenant_id
-                 AND r.uri=d.uri AND r.revision_id=d.revision_id)"""
+            """SELECT d.uri FROM documents d LEFT JOIN lexical_state s
+                 ON s.tenant_id=d.tenant_id AND s.uri=d.uri
+               WHERE d.tenant_id=? AND d.available=1 AND (
+                 s.revision_id IS NULL OR s.revision_id!=d.revision_id
+                 OR s.unit_count!=(SELECT COUNT(*) FROM retrieval_units r
+                   WHERE r.tenant_id=d.tenant_id AND r.uri=d.uri
+                     AND r.revision_id=d.revision_id)
+                 OR EXISTS (SELECT 1 FROM retrieval_units r
+                   WHERE r.tenant_id=d.tenant_id AND r.uri=d.uri
+                     AND r.revision_id=d.revision_id
+                     AND NOT EXISTS (SELECT 1 FROM retrieval_fts
+                       WHERE rowid=r.vector_id)))""",
+            (principal.tenant_id,),
         ).fetchall()
-        for row in rows:
-            try:
-                package = self.packages.get(row["package_hash"])
-                with self.transaction():
-                    index_package(self.db, self._record(row), package)
-                    self.db.execute("UPDATE vector_state SET outbox_offset=-1")
-            except (PackageMissing, PackageError):
-                continue
+        return tuple(
+            row["uri"] for row in rows if self._can_access(principal, row["uri"])
+        )
+
+    def lexical_warning(self, principal: Principal) -> str | None:
+        if self.lexical_stale_uris(principal):
+            return (
+                "Lexical index is incomplete or stale. "
+                "Run 'dc index lex rebuild' to rebuild it."
+            )
+        return None
 
     def index_status(self, principal: Principal) -> dict[str, int | str | None]:
         """Report the current, authorized retrieval projection."""
@@ -340,6 +364,7 @@ class LocalContextStore:
             (principal.tenant_id,),
         ).fetchall()
         visible = [row for row in rows if self._can_access(principal, row["uri"])]
+        stale = set(self.lexical_stale_uris(principal))
         indexed = units = embedded = 0
         for row in visible:
             count, with_embeddings = self.db.execute(
@@ -347,7 +372,7 @@ class LocalContextStore:
                    WHERE tenant_id=? AND uri=? AND revision_id=?""",
                 (principal.tenant_id, row["uri"], row["revision_id"]),
             ).fetchone()
-            indexed += count > 0
+            indexed += row["uri"] not in stale
             units += count
             embedded += with_embeddings
         state = self.db.execute(
@@ -356,13 +381,24 @@ class LocalContextStore:
         offset = self.db.execute(
             "SELECT COALESCE(MAX(sequence),0) FROM outbox"
         ).fetchone()[0]
+        snapshot_valid = False
+        if state is not None:
+            from .vectors import VectorStorageUnavailable, verified_vector_state
+
+            try:
+                verified_vector_state(self)
+                snapshot_valid = True
+            except VectorStorageUnavailable:
+                pass
         return {
             "documents": len(visible),
             "indexed_documents": indexed,
             "indexed_nodes": units,
             "embedded_nodes": embedded,
             "vector_model": state["model_id"] if state else None,
-            "vector_snapshot_current": bool(state and state["outbox_offset"] == offset),
+            "vector_snapshot_current": bool(
+                snapshot_valid and state and state["outbox_offset"] == offset
+            ),
         }
 
     def rebuild_index(

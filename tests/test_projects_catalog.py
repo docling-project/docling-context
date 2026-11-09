@@ -9,6 +9,7 @@ import pytest
 
 from docling_context.catalog import Catalog
 from docling_context.cli import main
+from docling_context.doclang_authoring import DEFAULT_SKILL_URI
 from docling_context.ingest_queue import IngestQueue
 from docling_context.local import LocalContextStore
 from docling_context.models import Principal
@@ -37,12 +38,13 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
     catalog.create_project(principal, "beta", "Beta")
 
     assert (
-        main([*args, "add-resource", str(source), "--project", "alpha", "--json"]) == 0
+        main([*args, "library", "add", str(source), "--project", "alpha", "--json"])
+        == 0
     )
     first = json.loads(capsys.readouterr().out)
     assert first["uri"].startswith("docling://resources/library/")
     assert (
-        main([*args, "add-resource", str(source), "--project", "beta", "--json"]) == 0
+        main([*args, "library", "add", str(source), "--project", "beta", "--json"]) == 0
     )
     second = json.loads(capsys.readouterr().out)
     assert second["uri"] == first["uri"]
@@ -51,7 +53,18 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
     overview = catalog.overview(principal)
     assert [
         (row["project_id"], row["documents"], row["skills"]) for row in overview
-    ] == [("alpha", 1, 0), ("beta", 1, 0)]
+    ] == [("alpha", 1, 1), ("beta", 1, 1)]
+    assert DEFAULT_SKILL_URI in {
+        row["uri"] for row in catalog.project_resources(principal, "alpha")
+    }
+    assert DEFAULT_SKILL_URI in {
+        row["uri"] for row in catalog.project_resources(principal, "beta")
+    }
+    default_skill = catalog.store.get_document(principal, DEFAULT_SKILL_URI)
+    assert default_skill.validate(allow_empty_namespace=True).ok()
+    assert "validate_package" in default_skill.xml()
+    with pytest.raises(ValueError, match="required by every project"):
+        catalog.unlink(principal, "alpha", DEFAULT_SKILL_URI)
     with LocalContextStore(store) as local:
         service = ContextService(local, principal)
         assert service.overview(OverviewRequest()).data[0]["documents"] == 1
@@ -63,6 +76,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         main(
             [
                 *args,
+                "library",
                 "search",
                 "telescope",
                 "--project",
@@ -82,9 +96,10 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         main(
             [
                 *args,
-                "resource",
-                "add",
-                "skills",
+                "skill",
+                "create",
+                "method",
+                "--from",
                 str(skill_source),
                 "--project",
                 "alpha",
@@ -98,7 +113,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
     assert (
         catalog.resource_links(principal, first["uri"])[0]["target_uri"] == skill["uri"]
     )
-    assert catalog.overview(principal)[0]["skills"] == 1
+    assert catalog.overview(principal)[0]["skills"] == 2
 
     catalog.unlink(principal, "alpha", first["uri"])
     assert catalog.overview(principal)[0]["documents"] == 0
@@ -107,6 +122,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         main(
             [
                 *args,
+                "library",
                 "search",
                 "telescope",
                 "--project",
@@ -121,7 +137,21 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
     assert capsys.readouterr().out == ""
 
     assert (
-        main([*args, "project", "session-start", "alpha", "--id", "chat-1", "--json"])
+        main(
+            [
+                *args,
+                "session",
+                "start",
+                "--project",
+                "alpha",
+                "--no-launch",
+                "--agent",
+                "codex",
+                "--id",
+                "chat-1",
+                "--json",
+            ]
+        )
         == 0
     )
     session = json.loads(capsys.readouterr().out)
@@ -130,9 +160,8 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         main(
             [
                 *args,
-                "project",
-                "session-append",
-                "alpha",
+                "session",
+                "append",
                 "chat-1",
                 "Remember: telescope evidence is reusable",
                 "--kind",
@@ -144,7 +173,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         == 0
     )
     capsys.readouterr()
-    assert main([*args, "project", "session-close", "alpha", "chat-1", "--json"]) == 0
+    assert main([*args, "session", "close", "chat-1", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "closed"
     assert catalog.overview(principal)[0]["sessions"] == 1
     assert main([*args, "memory", "worker", "--once", "--json"]) == 0
@@ -168,6 +197,24 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         assert catalog.overview(principal)[0]["documents"] == 1
 
 
+def test_existing_project_recovers_required_authoring_skill(tmp_path):
+    root = tmp_path / "store"
+    principal = Principal("team", "alice")
+    with LocalContextStore(root) as store:
+        catalog = Catalog(store)
+        catalog.create_project(principal, "alpha", "Alpha")
+        store.db.execute(
+            """DELETE FROM dc_project_resource_links
+               WHERE tenant_id=? AND project_id=? AND resource_type='skills'
+                 AND resource_id='doclang-authoring'""",
+            (principal.tenant_id, "alpha"),
+        )
+    with LocalContextStore(root) as store:
+        assert DEFAULT_SKILL_URI in {
+            row["uri"] for row in Catalog(store).project_resources(principal, "alpha")
+        }
+
+
 def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
     root = tmp_path / "store"
     source = tmp_path / "source.dclg"
@@ -176,13 +223,21 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
     descriptor.write_text("<doclang><text>Material observations</text></doclang>")
     metadata = tmp_path / "knowledge.json"
     metadata.write_text(
-        json.dumps({"name": "Materials", "fields": {"density": "number"}})
+        json.dumps(
+            {
+                "name": "Materials",
+                "schema": {
+                    "entity_types": ["material"],
+                    "properties": {"density": {"type": "number"}},
+                },
+            }
+        )
     )
     base = ["--store", str(root)]
     assert main([*base, "project", "create", "materials", "--title", "Materials"]) == 0
     capsys.readouterr()
     assert (
-        main([*base, "add-resource", str(source), "--project", "materials", "--json"])
+        main([*base, "library", "add", str(source), "--project", "materials", "--json"])
         == 0
     )
     library = json.loads(capsys.readouterr().out)
@@ -190,9 +245,10 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
         main(
             [
                 *base,
-                "resource",
-                "add",
-                "knowledge",
+                "concept",
+                "create",
+                "material-properties",
+                "--from",
                 str(descriptor),
                 "--metadata",
                 str(metadata),
@@ -203,7 +259,25 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
         )
         == 0
     )
+    concept = json.loads(capsys.readouterr().out)
+    assert (
+        main(
+            [
+                *base,
+                "knowledge",
+                "create",
+                "materials",
+                "--concept",
+                "material-properties",
+                "--project",
+                "materials",
+                "--json",
+            ]
+        )
+        == 0
+    )
     knowledge = json.loads(capsys.readouterr().out)
+    assert knowledge["concept_revision"] == concept["revision_id"]
     assert (
         main(
             [
@@ -231,8 +305,133 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
     facts = json.loads(capsys.readouterr().out)
     assert facts[0]["value"] == 3.0
     assert facts[0]["source_uri"] == library["uri"]
+    with LocalContextStore(root) as store:
+        catalog = Catalog(store)
+        principal = Principal("default", "local")
+        citation = {
+            "source_uri": library["uri"],
+            "source_revision": library["revision_id"],
+            "source_xpath": "/doclang[1]/text[1]",
+        }
+        for invalid in (
+            {"entity_type": "mineral", "property": "density", "value": 3.0},
+            {"entity_type": "material", "property": "porosity", "value": 3.0},
+            {"entity_type": "material", "property": "density", "value": "3.0"},
+        ):
+            with pytest.raises(ValueError, match="schema"):
+                catalog.add_fact(
+                    principal,
+                    knowledge["uri"],
+                    entity_id="basalt",
+                    **citation,
+                    **invalid,
+                )
     assert main([*base, "overview", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)[0]["knowledge"] == 1
+    assert json.loads(capsys.readouterr().out)["projects"][0]["knowledge"] == 1
+
+
+def test_concept_schema_required_and_dataset_revision_is_pinned(tmp_path, capsys):
+    root = tmp_path / "store"
+    descriptor = tmp_path / "concept.dclg"
+    descriptor.write_text("<doclang><text>Formation measurements</text></doclang>")
+    metadata = tmp_path / "concept.json"
+    base = ["--store", str(root)]
+
+    assert (
+        main([*base, "concept", "create", "formation", "--from", str(descriptor)]) == 1
+    )
+    assert "schema" in capsys.readouterr().err
+    metadata.write_text(
+        json.dumps(
+            {
+                "schema": {
+                    "entity_types": ["formation"],
+                    "properties": {"porosity": {"type": "number", "unit": "%"}},
+                }
+            }
+        )
+    )
+    create = [
+        *base,
+        "concept",
+        "create",
+        "formation",
+        "--from",
+        str(descriptor),
+        "--metadata",
+        str(metadata),
+        "--json",
+    ]
+    assert main(create) == 0
+    first_revision = json.loads(capsys.readouterr().out)["revision_id"]
+    assert (
+        main(
+            [
+                *base,
+                "knowledge",
+                "create",
+                "measurements",
+                "--concept",
+                "formation",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    dataset = json.loads(capsys.readouterr().out)
+    assert dataset["concept_revision"] == first_revision
+
+    metadata.write_text(
+        json.dumps(
+            {
+                "schema": {
+                    "entity_types": ["formation"],
+                    "properties": {"porosity": {"type": "integer"}},
+                }
+            }
+        )
+    )
+    assert main(create) == 0
+    assert json.loads(capsys.readouterr().out)["revision_id"] != first_revision
+    assert main([*base, "knowledge", "show", "measurements", "--json"]) == 0
+    pinned = json.loads(capsys.readouterr().out)
+    assert pinned["concept_revision"] == first_revision
+    assert pinned["schema"]["properties"]["porosity"] == {"type": "number", "unit": "%"}
+
+
+def test_library_relationship_commands(tmp_path, capsys):
+    root = tmp_path / "store"
+    source = tmp_path / "source.dclg"
+    source.write_text("<doclang><text>Shared document</text></doclang>")
+    base = ["--store", str(root)]
+    assert main([*base, "project", "create", "alpha", "--title", "Alpha"]) == 0
+    capsys.readouterr()
+    assert (
+        main([*base, "library", "add", str(source), "--project", "alpha", "--json"])
+        == 0
+    )
+    resource = json.loads(capsys.readouterr().out)
+    document_id = resource["uri"].rsplit("/", 1)[-1]
+    assert main([*base, "library", "projects", document_id, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["project_id"] == "alpha"
+    assert (
+        main(
+            [
+                *base,
+                "library",
+                "link",
+                document_id,
+                resource["uri"],
+                "--relation",
+                "related",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert main([*base, "library", "links", document_id, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)[0]["relation"] == "related"
 
 
 def test_project_context_jobs_refresh_after_membership_change(tmp_path, capsys):
@@ -243,18 +442,18 @@ def test_project_context_jobs_refresh_after_membership_change(tmp_path, capsys):
     assert main([*base, "project", "create", "geology", "--title", "Geology"]) == 0
     capsys.readouterr()
     for _ in range(2):
-        assert main([*base, "project", "worker", "--json"]) == 0
+        assert main([*base, "project", "context", "worker", "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["status"] == "completed"
     with LocalContextStore(root) as store:
         project = Catalog(store).get_project(Principal("default", "local"), "geology")
         assert project.abstract_uri and project.overview_uri
         before = store.get_record(Principal("default", "local"), project.overview_uri)
-    assert main([*base, "add-resource", str(source), "--project", "geology"]) == 0
+    assert main([*base, "library", "add", str(source), "--project", "geology"]) == 0
     capsys.readouterr()
-    assert main([*base, "project", "jobs", "geology", "--json"]) == 0
+    assert main([*base, "project", "context", "jobs", "geology", "--json"]) == 0
     assert {job["status"] for job in json.loads(capsys.readouterr().out)} == {"queued"}
     for _ in range(2):
-        assert main([*base, "project", "worker", "--json"]) == 0
+        assert main([*base, "project", "context", "worker", "--json"]) == 0
         assert json.loads(capsys.readouterr().out)["status"] == "completed"
     with LocalContextStore(root) as store:
         principal = Principal("default", "local")

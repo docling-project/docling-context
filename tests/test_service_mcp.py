@@ -62,6 +62,7 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
                     PRINCIPAL.tenant_id,
                     "--user",
                     PRINCIPAL.user_id,
+                    "library",
                     "jobs",
                     "status",
                     queued["job_id"],
@@ -81,9 +82,9 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
         assert search["hits"][0]["revision_id"] == finished.revision_id
         assert "Koonap Formation" in search["context"]
         assert (
-            service.show(
-                ShowRequest(URI, "@toc:/doclang[1]/toc[1]/entry[1]/description[1]")
-            ).data["content"]
+            service.show(ShowRequest(URI, "@toc:/doclang[1]/heading[1]")).data[
+                "content"
+            ]
             == "Karoo"
         )
         assert (
@@ -105,6 +106,7 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
                     PRINCIPAL.tenant_id,
                     "--user",
                     PRINCIPAL.user_id,
+                    "library",
                     "show",
                     URI,
                     "/doclang[1]/text[1]",
@@ -130,6 +132,7 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
             PRINCIPAL.tenant_id,
             "--user",
             PRINCIPAL.user_id,
+            "library",
             "show",
             URI,
             "/doclang[1]/text[1]",
@@ -300,7 +303,7 @@ def test_project_and_resource_operations_share_sqlite_catalog(tmp_path):
         started = call_service(
             service,
             "project_session_start",
-            {"project_id": "geology", "session_id": "review"},
+            {"project_id": "geology", "session_id": "review", "agent": "codex"},
         )
         assert started["data"]["uri"] == "docling://projects/geology/sessions/review"
         assert call_service(service, "overview", {})["data"][0]["sessions"] == 1
@@ -322,6 +325,33 @@ def test_project_and_resource_operations_share_sqlite_catalog(tmp_path):
         writable = create_mcp(service, allow_writes=True)
         assert "project_link" in {
             tool.name for tool in asyncio.run(writable.list_tools())
+        }
+
+
+def test_mcp_search_defaults_to_launched_project(tmp_path, monkeypatch):
+    from docling_context.catalog import Catalog
+
+    with LocalContextStore(tmp_path) as store:
+        catalog = Catalog(store)
+        catalog.create_project(PRINCIPAL, "geology", "Geology")
+        for name in ("linked", "other"):
+            document = DocLangXDocument()
+            assert document.read_xml(f"<doclang><text>Koonap {name}</text></doclang>")
+            record = Ingestor(store).add_resource(
+                PRINCIPAL,
+                f"docling://resources/library/{name}",
+                document.write_bytes(),
+                filename=f"{name}.dclx",
+            )
+            catalog.register_resource(PRINCIPAL, record, "library")
+            if name == "linked":
+                catalog.link(PRINCIPAL, "geology", record.uri)
+        monkeypatch.setenv("DOCLING_CONTEXT_PROJECT", "geology")
+        server = create_mcp(ContextService(store, PRINCIPAL))
+        result = asyncio.run(server.call_tool("search", {"query": "Koonap"}))
+        assert result[1]["data"]["hits"]
+        assert {hit["uri"] for hit in result[1]["data"]["hits"]} == {
+            "docling://resources/library/linked"
         }
 
 

@@ -195,6 +195,51 @@ def validate_memory(document: DocLangXDocument) -> dict[str, Any]:
     return metadata
 
 
+def validate_concept_schema(schema: Any) -> dict[str, Any]:
+    if not isinstance(schema, dict):
+        raise TypeError("concept requires a schema object")
+    entities = schema.get("entity_types")
+    properties = schema.get("properties")
+    if (
+        not isinstance(entities, list)
+        or not entities
+        or any(not isinstance(item, str) or not item.strip() for item in entities)
+        or len(set(entities)) != len(entities)
+    ):
+        raise ValueError("concept schema requires distinct entity_types")
+    if not isinstance(properties, dict) or not properties:
+        raise ValueError("concept schema requires typed properties")
+    for name, definition in properties.items():
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(definition, dict)
+            or definition.get("type")
+            not in {"text", "integer", "number", "boolean", "json"}
+            or (
+                "unit" in definition
+                and (
+                    not isinstance(definition["unit"], str)
+                    or not definition["unit"].strip()
+                )
+            )
+        ):
+            raise ValueError("invalid concept property definition")
+    relationships = schema.get("relationship_types", {})
+    if not isinstance(relationships, dict):
+        raise TypeError("invalid concept relationship_types")
+    for name, definition in relationships.items():
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(definition, dict)
+            or definition.get("source") not in entities
+            or definition.get("target") not in entities
+        ):
+            raise ValueError("invalid concept relationship definition")
+    return schema
+
+
 def validate_descriptor(uri: str, document: DocLangXDocument) -> dict[str, Any]:
     address = parse_uri(uri)
     if address.namespace != "resources" or address.segments[0] not in DESCRIPTOR_PARTS:
@@ -212,14 +257,13 @@ def validate_descriptor(uri: str, document: DocLangXDocument) -> dict[str, Any]:
     ):
         raise ValueError(f"invalid {singular} metadata")
     if resource_type == "concepts":
-        for field in ("entity_types", "relationship_types", "properties"):
-            value = metadata.get(field)
-            if not isinstance(value, list) or any(
-                not isinstance(item, str) or not item.strip() or len(item) > 100
-                for item in value
-            ):
-                raise ValueError(f"invalid concept {field}")
+        validate_concept_schema(metadata.get("schema"))
     if resource_type == "knowledge":
+        if metadata.get("concept_uri") and (
+            not metadata.get("concept_revision")
+            or parse_uri(metadata["concept_uri"]).segments[0] != "concepts"
+        ):
+            raise ValueError("knowledge concept_uri must reference a concept")
         fields = metadata.get("fields")
         if not isinstance(fields, dict) or any(
             not isinstance(name, str)

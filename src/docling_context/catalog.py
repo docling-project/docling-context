@@ -6,8 +6,17 @@ import json
 import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Self
+from xml.sax.saxutils import escape
 
+from .doclang_authoring import (
+    DEFAULT_SKILL_NAME,
+    DEFAULT_SKILL_SUMMARY,
+    DEFAULT_SKILL_TEXT,
+    DEFAULT_SKILL_URI,
+)
 from .models import DocumentRecord, NodeAddress, Principal
+from .package import load_package
+from .profiles import validate_descriptor
 from .uri import parse_uri
 
 if TYPE_CHECKING:
@@ -92,7 +101,7 @@ class Catalog:
             """CREATE TABLE IF NOT EXISTS dc_project_sessions (
                  tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
                  session_id TEXT NOT NULL, owner_id TEXT NOT NULL,
-                 status TEXT NOT NULL DEFAULT 'open', revision_id TEXT,
+                 agent TEXT, status TEXT NOT NULL DEFAULT 'open', revision_id TEXT,
                  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                  PRIMARY KEY (tenant_id, project_id, session_id),
                  FOREIGN KEY (tenant_id, project_id)
@@ -152,10 +161,32 @@ class Catalog:
         with self.store.transaction():
             for statement in statements:
                 self.db.execute(statement)
+            columns = {
+                row["name"]
+                for row in self.db.execute("PRAGMA table_info(dc_project_sessions)")
+            }
+            if "agent" not in columns:
+                self.db.execute("ALTER TABLE dc_project_sessions ADD COLUMN agent TEXT")
             self.db.execute(
                 "INSERT OR IGNORE INTO dc_schema_version (version) VALUES (?)",
                 (CATALOG_SCHEMA_VERSION,),
             )
+        self._ensure_existing_project_skills()
+
+    def _ensure_existing_project_skills(self) -> None:
+        rows = self.db.execute(
+            """SELECT p.tenant_id,p.project_id,p.owner_id FROM dc_projects p
+               LEFT JOIN dc_project_resource_links l
+                 ON l.tenant_id=p.tenant_id AND l.project_id=p.project_id
+                AND l.resource_type='skills' AND l.resource_id=?
+               WHERE l.project_id IS NULL""",
+            (DEFAULT_SKILL_URI.rsplit("/", 1)[-1],),
+        ).fetchall()
+        for row in rows:
+            principal = Principal(row["tenant_id"], row["owner_id"])
+            with self.store.transaction():
+                self._ensure_default_skill(principal)
+                self.link(principal, row["project_id"], DEFAULT_SKILL_URI)
 
     @staticmethod
     def _project_id(value: str) -> str:
@@ -193,13 +224,38 @@ class Catalog:
         if not title.strip():
             raise ValueError("project title is required")
         with self.store.transaction():
+            self._ensure_default_skill(principal)
             self.db.execute(
                 """INSERT INTO dc_projects
                    (tenant_id,project_id,title,owner_id) VALUES (?,?,?,?)""",
                 (principal.tenant_id, project_id, title.strip(), principal.user_id),
             )
-            self._queue_context(principal, project_id)
+            self.link(principal, project_id, DEFAULT_SKILL_URI)
         return Project(project_id, title.strip(), None, None, None)
+
+    def _ensure_default_skill(self, principal: Principal) -> None:
+        row = self.db.execute(
+            """SELECT 1 FROM dc_resources WHERE tenant_id=? AND uri=?""",
+            (principal.tenant_id, DEFAULT_SKILL_URI),
+        ).fetchone()
+        if row is not None:
+            return
+        from .ingestion import Ingestor
+
+        xml = f"<doclang><text>{escape(DEFAULT_SKILL_TEXT)}</text></doclang>"
+        record = Ingestor(self.store).add_resource(
+            principal,
+            DEFAULT_SKILL_URI,
+            xml.encode("utf-8"),
+            filename="doclang-authoring.dclg",
+            profile_metadata={
+                "profile": "skill-v1",
+                "skill_id": DEFAULT_SKILL_URI.rsplit("/", 1)[-1],
+                "name": DEFAULT_SKILL_NAME,
+                "summary": DEFAULT_SKILL_SUMMARY,
+            },
+        )
+        self.register_resource(principal, record, "skills")
 
     def get_project(self, principal: Principal, project_id: str) -> Project:
         project_id = self._project_id(project_id)
@@ -291,6 +347,7 @@ class Catalog:
         *,
         status: str = "open",
         revision_id: str | None = None,
+        agent: str | None = None,
     ) -> None:
         project_id = self._project_id(project_id)
         if status not in {"open", "closed"}:
@@ -300,16 +357,18 @@ class Catalog:
         with self.store.transaction():
             self.db.execute(
                 """INSERT INTO dc_project_sessions
-                   (tenant_id,project_id,session_id,owner_id,status,revision_id)
-                   VALUES (?,?,?,?,?,?)
+                   (tenant_id,project_id,session_id,owner_id,agent,status,revision_id)
+                   VALUES (?,?,?,?,?,?,?)
                    ON CONFLICT (tenant_id,project_id,session_id)
                    DO UPDATE SET status=excluded.status,
+                     agent=COALESCE(dc_project_sessions.agent,excluded.agent),
                      revision_id=COALESCE(excluded.revision_id,dc_project_sessions.revision_id)""",
                 (
                     principal.tenant_id,
                     project_id,
                     session_id,
                     principal.user_id,
+                    agent,
                     status,
                     revision_id,
                 ),
@@ -320,7 +379,7 @@ class Catalog:
     ) -> list[dict[str, str]]:
         self.get_project(principal, project_id)
         rows = self.db.execute(
-            """SELECT session_id,status,owner_id FROM dc_project_sessions
+            """SELECT session_id,agent,status,owner_id,created_at FROM dc_project_sessions
                WHERE tenant_id=? AND project_id=? ORDER BY session_id""",
             (principal.tenant_id, project_id),
         ).fetchall()
@@ -402,6 +461,10 @@ class Catalog:
     def unlink(self, principal: Principal, project_id: str, uri: str) -> None:
         project_id = self._project_id(project_id)
         resource_type, resource_id = self._resource_parts(uri)
+        if uri == DEFAULT_SKILL_URI:
+            raise ValueError(
+                "the default DocLang authoring skill is required by every project"
+            )
         self.get_project(principal, project_id)
         with self.store.transaction():
             self.db.execute(
@@ -542,27 +605,89 @@ class Catalog:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def register_knowledge_dataset(
-        self, principal: Principal, uri: str, fields: dict[str, str]
-    ) -> None:
-        resource_type, knowledge_id = self._resource_parts(uri)
-        if resource_type != "knowledge":
-            raise ValueError("expected a knowledge resource")
-        if any(
-            kind not in {"text", "integer", "number", "boolean", "json"}
-            for kind in fields.values()
+    @staticmethod
+    def resource_uri(kind: str, value: str) -> str:
+        uri = (
+            value
+            if value.startswith("docling://")
+            else f"docling://resources/{kind}/{value}"
+        )
+        address = parse_uri(uri)
+        if (
+            address.namespace != "resources"
+            or address.segments[0] != kind
+            or len(address.segments) != 2
         ):
-            raise ValueError("unsupported knowledge field type")
+            raise ValueError(f"expected a {kind} ID or URI")
+        return uri
+
+    def resources(
+        self, principal: Principal, kind: str, project_id: str | None = None
+    ) -> list[dict[str, Any]]:
+        if project_id:
+            return [
+                row
+                for row in self.project_resources(principal, project_id)
+                if row["resource_type"] == kind
+            ]
+        rows = self.db.execute(
+            "SELECT resource_type,resource_id,uri,current_revision AS revision_id FROM dc_resources WHERE tenant_id=? AND resource_type=? ORDER BY resource_id",
+            (principal.tenant_id, kind),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def knowledge_dataset(self, principal: Principal, uri: str) -> dict[str, Any]:
+        uri = self.resource_uri("knowledge", uri)
+        self.store.get_record(principal, uri)
+        row = self.db.execute(
+            "SELECT schema_json FROM dc_knowledge_datasets WHERE tenant_id=? AND knowledge_id=?",
+            (principal.tenant_id, uri.rsplit("/", 1)[-1]),
+        ).fetchone()
+        if row is None:
+            raise ValueError("knowledge dataset is not registered")
+        data = json.loads(row["schema_json"])
+        if "concept_uri" not in data:
+            raise ValueError(
+                "knowledge dataset has no pinned concept; recreate it with knowledge create --concept"
+            )
+        return {"uri": uri, **data}
+
+    def register_knowledge_dataset(
+        self,
+        principal: Principal,
+        uri: str,
+        concept_uri: str,
+        concept_revision: str | None = None,
+    ) -> None:
+        uri = self.resource_uri("knowledge", uri)
+        concept_uri = self.resource_uri("concepts", concept_uri)
+        concept = self.store.get_record(principal, concept_uri)
+        if concept_revision:
+            concept = self.store.get_revision(
+                principal,
+                NodeAddress(concept.document_id, concept_revision, "/doclang[1]"),
+            )
+        metadata = validate_descriptor(
+            concept_uri, load_package(self.store.packages.get(concept.package.sha256))
+        )
+        data = {
+            "concept_uri": concept_uri,
+            "concept_revision": concept.revision_id,
+            "schema": metadata["schema"],
+        }
+        encoded = json.dumps(data, sort_keys=True)
+        previous = self.db.execute(
+            "SELECT schema_json FROM dc_knowledge_datasets WHERE tenant_id=? AND knowledge_id=?",
+            (principal.tenant_id, uri.rsplit("/", 1)[-1]),
+        ).fetchone()
+        if previous and previous[0] != encoded:
+            raise ValueError("a knowledge dataset's pinned concept cannot be changed")
         with self.store.transaction():
             self.db.execute(
-                """INSERT INTO dc_knowledge_datasets
-                   (tenant_id,knowledge_id,schema_json,current_version)
-                   VALUES (?,?,?,1)
-                   ON CONFLICT (tenant_id,knowledge_id)
-                   DO UPDATE SET schema_json=excluded.schema_json,
-                     current_version=current_version+1""",
-                (principal.tenant_id, knowledge_id, json.dumps(fields, sort_keys=True)),
+                "INSERT OR IGNORE INTO dc_knowledge_datasets (tenant_id,knowledge_id,schema_json,current_version) VALUES (?,?,?,1)",
+                (principal.tenant_id, uri.rsplit("/", 1)[-1], encoded),
             )
+            self.link_resources(principal, uri, concept_uri, "defined-by")
 
     def add_fact(
         self,
@@ -576,19 +701,18 @@ class Catalog:
         source_uri: str,
         source_revision: str,
         source_xpath: str,
+        unit: str | None = None,
     ) -> str:
         resource_type, knowledge_id = self._resource_parts(knowledge_uri)
         if resource_type != "knowledge":
             raise ValueError("expected a knowledge resource")
-        row = self.db.execute(
-            """SELECT schema_json FROM dc_knowledge_datasets
-               WHERE tenant_id=? AND knowledge_id=?""",
-            (principal.tenant_id, knowledge_id),
-        ).fetchone()
-        if row is None:
-            raise ValueError("knowledge dataset is not registered")
-        fields = json.loads(row["schema_json"])
-        kind = fields.get(property)
+        schema = self.knowledge_dataset(principal, knowledge_uri)["schema"]
+        definition = schema["properties"].get(property, {})
+        kind = definition.get("type")
+        if entity_type not in schema["entity_types"]:
+            raise ValueError("entity type does not match the pinned concept schema")
+        if unit != definition.get("unit"):
+            raise ValueError("fact unit does not match the pinned concept schema")
         valid = {
             "text": isinstance(value, str),
             "integer": isinstance(value, int) and not isinstance(value, bool),

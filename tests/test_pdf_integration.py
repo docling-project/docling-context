@@ -18,6 +18,7 @@ from docling_context import (
 )
 from docling_context.catalog import Catalog
 from docling_context.cli import main
+from docling_context.doclang_authoring import get_outline, get_summary
 
 
 def _native_conversion_available() -> bool:
@@ -82,8 +83,8 @@ def test_local_pdf_to_valid_dclx(tmp_path):
         )
         package = store.get_document(Principal("tenant", "alice"), record.uri)
         assert "Hello DocLang" in package.xml()
-        assert package.summary() is not None
-        assert package.toc() is not None
+        assert get_summary(package) is not None
+        assert get_outline(package) is not None
         assert any(node["bbox"] is not None for node in package.iter_nodes(limit=1000))
         assert record.source["converter_options"]["do_ocr"] is False
         assert record.source["converter_options"]["do_table_structure"] is False
@@ -109,7 +110,8 @@ def test_cli_imports_nested_pdf_folder(tmp_path, capsys):
             main(
                 [
                     *base,
-                    "add-resource",
+                    "library",
+                    "add",
                     str(folder),
                     "--project",
                     "papers",

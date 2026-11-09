@@ -2,8 +2,8 @@
 
 Reviewed memories and compiled project session outcomes are DCLX packages in
 the flat `docling://resources/memories/{memory_id}` list. A memory may link to
-several projects. `dc resource add memories FILE [--project ID]` accepts a
-DCLX package with a valid memory profile.
+several projects. `dc memory create --from FILE --project ID` accepts authored DCLG or DCLX.
+The first text node is its short claim; the original document body is retained.
 
 `MemoryService` stores each claim as a DCLX package under
 `docling://resources/memories/{memory_id}`. Supported kinds are

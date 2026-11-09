@@ -1,237 +1,226 @@
-# `dc` CLI
+# `dc` command guide
 
-Install the package to expose `dc`. For PDF input, install the `conversion`
-extra. Run `dc init` to create the local SQLite catalog and package directory.
-The store defaults to `~/.local/share/docling-context`;
-pass `--store PATH` to choose another directory. `--tenant` and `--user`
-select the principal, defaulting to `default` and `local`. Use `uv run dc` or
-activate the environment; some systems also have a calculator named `dc`.
+`dc` stores source documents, reusable conclusions, methods, concepts, and cited facts in one local SQLite store. Projects link selected resources without copying them. The default store is `~/.local/share/docling-context`; pass `--store PATH` before a command to use another one. Run `dc` without arguments for a project overview and three starting commands. The examples below use `uv run dc`.
 
-```bash
-export DOCLING_CONTEXT_STORE=./context-data
+| Resource | Purpose |
+| --- | --- |
+| Library document | An imported source PDF, office document, image, URL, DCLG, or DCLX in `resources/library/`. |
+| Memory | A reviewed conclusion or session outcome stored as DCLX in `resources/memories/`. |
+| Skill | A reusable method stored as DCLX in `resources/skills/`. |
+| Concept | A DCLX definition with a mandatory schema for entity types, properties, units, and relationships. |
+| Knowledge dataset | A DCLX descriptor plus cited SQLite facts that follow a pinned concept revision. |
+| Project | A topic, its resource links, context documents, and agent sessions. |
+
+## Five minutes to start
+
+```sh
+uv sync --all-extras
 uv run dc init
-uv run dc project create papers --title "Paper review"
-uv run --extra conversion dc --store ./context-data add-resource ./paper.pdf \
-  --project papers --no-ocr --tables --no-charts
-uv run dc overview
-uv run dc project resources papers
-uv run dc resource projects docling://resources/library/DOC_ID
-uv run dc search "invoice" --project papers
-uv run dc project link papers docling://resources/library/DOC_ID
-uv run dc project unlink papers docling://resources/library/DOC_ID
-uv run dc resource add skills ./method.dclx --project papers
-uv run dc resource link docling://resources/library/DOC_ID \
-  docling://resources/skills/SKILL_ID --relation uses-method
-uv run dc resource links docling://resources/library/DOC_ID
-uv run dc project set-description papers ./description.dclx
-uv run dc project worker
-uv run dc project jobs papers
-uv run dc project session-start papers --id review-1
-uv run dc project session-append papers review-1 "Read section 2" --kind turn --key turn-1
-uv run dc project session-close papers review-1
-uv run dc --store ./context-data status
-uv run dc --store ./context-data index status
-uv run dc --store ./context-data index lex status
-uv run dc --store ./context-data index lex rebuild
-uv run --extra vectors dc --store ./context-data index vector status
-uv run --extra vectors dc --store ./context-data index vector rebuild
-uv run --extra vectors dc --store ./context-data search "invoice" --project papers --mode hybrid
-uv run dc --store ./context-data ls docling://resources/
-uv run dc --store ./context-data tree docling://resources/library -L 2
-uv run dc --store ./context-data outline docling://resources/library/DOC_ID
-uv run dc --store ./context-data show docling://resources/library/DOC_ID \
-  '/doclang[1]/text[1]' --format xml
-uv run dc --store ./context-data session start --id chat-1
-uv run dc --store ./context-data session list --status open
-uv run dc --store ./context-data memory list --status proposed
-uv run docling-context integrate codex --scope project --store ./context-data
-uv run docling-context doctor codex --scope project --store ./context-data
+uv run dc project create materials --title 'Materials Research'
+uv run dc library add ./paper.pdf --project materials
+uv run dc library search 'porous materials' --project materials
+uv run dc session start --project materials --agent codex
 ```
 
-`add-resource` accepts one document or a folder of documents. With the
-`conversion` extra installed, it accepts Docling's supported formats, including
-PDF, DOCX, PPTX, XLSX, images, HTML, and plain text. Native DCLG and DCLX files
-also work without that extra. Folder imports scan the top level by default.
-Add `-r` or `--recursive` to include subfolders; those paths are retained in
-source provenance. Use repeatable `--from FORMAT` options to select Docling format names,
-such as `--from pdf --from docx --from image` (default: all). Filtering uses
-filename extensions; Docling then detects the actual input format. Every new
-source receives a flat library URI; an identical source binary reuses its URI.
-Use `--project ID` to link the import to a project. Use `--config`
-for a [JSON conversion config](conversion.md), with command flags overriding it.
-Use `--force` to create a new revision for unchanged input.
-Table reconstruction always uses accurate mode; there is no CLI mode switch.
-Page and picture images are on by default, and there is no default page limit.
-`--no-page-images`, `--no-picture-images`, and `--max-pages N` override these
-defaults. OCR uses RapidOCR with English PP-OCRv6 `tiny` models when enabled.
+The top level has one route for each kind of work: `init`, `overview`, `project`, `library`, `session`, `memory`, `concept`, `skill`, `knowledge`, `index`, and `agent`. Use `dc COMMAND --help` to inspect options. Agent and script callers can add `--json` to individual commands.
 
-Ingestion is synchronous. `add-resource` prints its library URI, revision,
-source hash, and optional project ID. `dc overview` lists projects and counts their
-distinct linked resources; `--json`, `--limit`, and `--offset` are supported.
-`dc project set-abstract` and `set-overview` accept native DCLX or DCLG files.
-Project changes queue automatic abstract and overview refresh jobs; run
-`dc project worker` to process them.
-Project session commands store DCLX event packages under the project path and
-make the session count visible in `dc overview`. Closing one queues memory
-compilation; `dc memory worker --once` creates proposed shared memories.
+To see every command and nested subcommand at once, run `uv run python scripts/dump_cli_tree.py`. Add `--show-options` to include their arguments. The script reads the CLI parser, so the tree follows command changes.
 
-Skills, concepts, and knowledge are flat DCLX resources. `resource add` adds a
-typed metadata part to the package. Supply `--metadata FILE` to define it; for
-example, a knowledge descriptor can use:
+## `init` and `overview`
+
+`init` creates the SQLite catalog and package store. `overview` lists every project with its linked resource counts and also reports store and job counts. Bare `dc` displays the same overview with starting examples.
+
+```sh
+uv run dc init
+uv run dc overview
+uv run dc overview --json
+```
+
+## `project`
+
+Projects define topics and membership. Every project links the shared `doclang-authoring` skill. Project context consists of an optional description and generated abstract and overview documents.
+
+| Subcommand | Use |
+| --- | --- |
+| `create ID --title TITLE` | Create a project. |
+| `show ID` | Read its title and context URIs. |
+| `resources ID` | List its linked library documents, memories, skills, concepts, and knowledge datasets. |
+| `link ID URI` / `unlink ID URI` | Change membership. |
+| `context set ID --description FILE` | Set a DCLG or DCLX description; `--abstract` and `--overview` also work. |
+| `context show ID` | Read its context documents. |
+| `context refresh ID` | Queue regeneration of the abstract and overview inventory. |
+| `context jobs ID` / `context worker` | Inspect or process regeneration jobs. |
+
+```sh
+uv run dc project create oilgas --title 'Oil and Gas'
+uv run dc project link oilgas docling://resources/library/DOC_ID
+uv run dc project resources oilgas
+uv run dc project context set oilgas --description ./description.dclx
+uv run dc project context worker
+```
+
+The generated abstract and overview describe the project's title, description, counts, and linked URIs. They do not summarize the contents of its source documents.
+
+## `library`
+
+The library owns original source documents and their discovery. Imported content is deduplicated by binary hash. `--project` links the imported document to a project. A repeat import reuses the library ID; conversion options can still produce a new revision.
+
+| Subcommand | Use |
+| --- | --- |
+| `add SOURCE` | Import a local file, folder, or HTTP(S) URL. Use `-r` for nested folders. |
+| `list [--project ID]` | List source documents. |
+| `projects ID` | List projects linked to a document. |
+| `links ID` / `link ID TARGET_URI --relation NAME` | Inspect or create document relationships. |
+| `tree [URI]` | Walk a URI subtree. |
+| `outline ID` | Read a document's table of contents. |
+| `show ID XPATH` | Read one cited node. Full URIs also work. |
+| `find TERM` / `grep TERM` | Bounded substring lookup. `find` ranks by occurrence count; `grep` keeps scan order. |
+| `search QUERY` | Indexed lexical, vector, or hybrid search with exact citations. |
+| `jobs status JOB_ID` | Inspect an asynchronous ingestion job created by an agent or API. |
+
+```sh
+uv run dc library add ./papers -r --project oilgas
+uv run dc library add 'https://example.org/paper.pdf' --project oilgas
+uv run dc library list --project oilgas
+uv run dc library search 'Khurmala diagenesis' --project oilgas --mode hybrid
+uv run dc library outline DOC_ID
+uv run dc library show DOC_ID '/doclang[1]/text[1]'
+```
+
+`library add` converts synchronously. Its terminal progress bar counts PDF pages and advances after each document is reused or converted and committed. Other source types count as one unit. The bar reaches 100% after the whole import finishes; restart the same command after interruption. Conversion settings are in [conversion.md](conversion.md). `--json` keeps import output as JSON lines and hides the progress bar.
+
+Search covers all indexed nodes in the selected project by default. `--tier 0`, `--tier 1`, and `--tier 2` narrow it to summary, outline, and source nodes. `-k` controls the returned hit count. Search warns when an index is stale and gives its rebuild command. See [retrieval.md](retrieval.md).
+
+## `session`
+
+One session command family handles both interactive and manual sessions. `start` installs the agent's managed skill and MCP connection, starts a project session, launches the agent in the current terminal, and returns after the agent exits. `--no-launch` creates a session record for an agent already running.
+
+| Subcommand | Use |
+| --- | --- |
+| `start --project ID --agent NAME` | Launch Codex, Claude, Hermes, or Pi. |
+| `list [--project ID]` | List sessions and their agent and state. |
+| `show ID` / `replay ID` | Inspect session metadata or events. |
+| `append ID TEXT --kind KIND --key KEY` | Save an event with a stable key. |
+| `close ID` | Close the session and queue memory compilation. |
+| `jobs ID` | Inspect memory compilation jobs. |
+| `trim`, `attachment`, `delete`, `purge` | Manage events and lifecycle. |
+
+```sh
+uv run dc session start --project oilgas --agent claude
+uv run dc session start --project oilgas --agent codex --no-launch
+uv run dc session list --project oilgas
+uv run dc session append SESSION_ID 'Reviewed section 2' --kind turn --key review-1
+uv run dc session close SESSION_ID
+```
+
+A returned session ID works directly if it uniquely identifies one of your project sessions. Use the full session URI when IDs are ambiguous. Agents record useful outcomes through MCP; the launcher does not automatically copy the agent's complete conversation. See [sessions.md](sessions.md) and [agents.md](agents.md).
+
+## `memory`
+
+A memory is a durable conclusion or synthesis. Session compilation can propose one; an accepted memory enters recall and search. Direct creation can use a claim or an authored DCLG/DCLX document. With `--from`, the first `<text>` node is the concise claim and the original document body is retained across review.
+
+| Subcommand | Use |
+| --- | --- |
+| `create [KIND] CLAIM [--project ID]` | Create a proposed memory; `--accepted` accepts a user-authored claim immediately. |
+| `create --from FILE [--project ID]` | Create from DCLG/DCLX. |
+| `list [--project ID]` / `show ID` | Inspect memories and review state. |
+| `proposals`, `accept`, `reject`, `correct` | Review or correct a memory. |
+| `search QUERY [--project ID]` / `recall QUERY [--project ID]` | Find accepted conclusions; recall suppresses repeats per session. |
+| `worker --once` / `jobs SESSION_ID` | Process or inspect compilation. |
+| `delete` / `purge` | Remove a memory or its history. |
+
+```sh
+uv run dc memory create --from ./diagenesis-summary.dclx --project oilgas
+uv run dc memory list --project oilgas
+uv run dc memory search 'Khurmala' --project oilgas
+uv run dc memory accept MEMORY_ID
+uv run dc memory worker --once
+```
+
+See [memory.md](memory.md) for citations and review behavior.
+
+## `concept`
+
+A concept defines what facts mean. Create one from a DCLG or DCLX document and a mandatory schema descriptor. Its `schema` defines nonempty `entity_types`, typed `properties`, optional units, and optional `relationship_types` with source and target entity types.
 
 ```json
-{"name":"Materials","summary":"Measured material properties","fields":{"density":"number","phase":"text"}}
+{
+  "name": "Formation properties",
+  "summary": "Observed properties of geological formations",
+  "schema": {
+    "entity_types": ["formation"],
+    "properties": {"porosity": {"type": "number", "unit": "%"}},
+    "relationship_types": {"overlies": {"source": "formation", "target": "formation"}}
+  }
+}
 ```
 
-After `dc resource add knowledge ./materials.dclg --metadata ./materials.json
---project papers`, use `dc knowledge add-fact --help` to see the required
-entity, property, JSON value, and exact source citation arguments. `dc knowledge
-facts KNOWLEDGE_URI` lists stored facts. Concept metadata can define
-`entity_types`, `relationship_types`, and `properties`; skill metadata holds
-its name and summary. Use `dc resource link` for relationships between these
-resources and library documents.
-
-`outline URI` reads the TOC sidecar and `show URI XPATH` reads one cited node.
-Use `--revision ID` for an immutable revision, `--format xml` for DocLang XML,
-and `--max-chars N` to bound output. Both commands show labeled tables by
-default; `--raw` prints only the XML or node content. Use `--json` for the full
-record, including URI, document ID, revision ID, XPath, and truncation marker.
-
-`docling-context` exposes the existing `dc` commands and adds `mcp`,
-`integrate`, `doctor`, `remove`, and `ingest-worker`. See the
-[agent harness guide](agents.md) for scopes, remote tokens, and verification.
-
-CLI commands print labeled tables by default. `dc tree` also has `--raw` for an
-indented URI view. Pass `--json` for structured output, for example
-`dc status --json`, `dc add-resource FILE --json`, or
-`dc project show ID --json`. Import, project-resource, resource-link, tree,
-`ls`, `find`, and `grep` commands emit one JSON object per row; other list
-commands emit a JSON array.
-The main `status` also shows session, memory, and memory compilation job counts
-for the selected user. The session and memory lists support `--limit` and `--offset` pages;
-the default page size is 100 and the maximum is 1,000.
-
-## Sessions and memory
-
-Start a session before recording events. `start --id` is idempotent for an open
-session; omit `--id` to generate one. Session commands use the selected tenant
-and user. `append` needs a stable `--key`, so a retried harness hook cannot
-duplicate an event. Use `--stdin` for text that should stay out of process
-arguments. An optional binary `--attachment` is stored as a typed DCLX part.
-
-```bash
-uv run dc session start --id chat-1 --json
-printf 'I prefer concise replies' | uv run dc session append chat-1 \
-  --kind feedback --key feedback-1 --stdin --json
-uv run dc session replay chat-1
-uv run dc session show chat-1
-uv run dc session list --status open --since 2026-10-01
-uv run dc session close chat-1
-uv run dc memory worker --once
-uv run dc memory proposals
+```sh
+uv run dc concept create formation-properties --from ./formation-properties.dclg \
+  --metadata ./formation-properties.json --project oilgas
+uv run dc concept show formation-properties
+uv run dc concept list --project oilgas
+uv run dc concept projects formation-properties
 ```
 
-Set `DOCLING_CONTEXT_SESSION=chat-1` to omit the ID from `session append`, or
-use `--text` when sending a short event without stdin. `session close` prevents
-new events and queues compilation of the final revision. `session jobs ID` and
-`memory jobs ID` show compilation outcomes. `memory worker` polls for jobs;
-`--once` handles one due job and exits. Queued jobs for older session revisions
-become `superseded` when a newer revision is queued.
+`create` also accepts a DCLX that already contains `context/concept.json`. Both sources are validated before storage. `links` and `link` inspect or create relationships with other resources.
 
-`session list` filters by `--status open|closed` and `--since`/`--until` ISO
-dates or timestamps. `session trim ID --keep-last N` creates a shorter current
-revision. Use `session attachment ID KEY --output FILE` to save one attached
-event payload.
+## `skill`
 
-```bash
-uv run dc memory list --kind preference --status proposed
-uv run dc memory show MEMORY_URI --json
-uv run dc memory accept MEMORY_URI
-uv run dc memory search 'concise replies'
-uv run dc memory recall 'concise replies' --session chat-1
-uv run dc memory correct MEMORY_URI 'I prefer brief answers'
-uv run dc memory reject MEMORY_URI --reason 'Incorrect inference'
-uv run dc memory delete MEMORY_URI
-uv run dc memory purge MEMORY_URI
+Skills are shared, named DCLX methods. Create one from DCLG or DCLX, optionally supplying descriptor JSON with a name and summary. Every project automatically links `doclang-authoring`.
+
+```sh
+uv run dc skill create sampling-method --from ./sampling-method.dclx --project oilgas
+uv run dc skill show sampling-method
+uv run dc skill list --project oilgas
 ```
 
-`memory list` includes every non-purged status by default, including rejected
-and deleted claims. Filter it by `--status`, `--kind`, `--since`, or `--until`.
-`memory proposals` is a shortcut for proposed claims. `memory create KIND CLAIM`
-creates a user-authored proposal; `--accepted` accepts it immediately. Optional
-source citations require all four flags: `--source-uri`,
-`--source-document-id`, `--source-revision-id`, and `--source-xpath`.
-`memory search` and `memory recall` return accepted claims only. Recall records
-which memory revision was delivered to a session and suppresses repeats.
+`projects`, `links`, and `link` inspect memberships and resource relationships.
 
-### Delete and purge
+## `knowledge`
 
-`delete` withdraws an item from normal use while retaining its history. `purge`
-removes that item's stored revisions and content. Both commands are scoped to
-the selected tenant and user.
+A knowledge dataset contains individually cited facts in SQLite and a DCLX descriptor in `resources/knowledge/`. Creation requires a concept. The dataset pins that concept's URI and immutable revision; a later concept edit does not change the dataset's schema. One concept can define several datasets in different projects.
 
-| Command | Immediate effect | What remains |
-| --- | --- | --- |
-| `dc session delete ID` | Removes the current session from `session list`, `show`, and `replay`. | Historical revisions and their attachments remain stored; compilation jobs and the session's recall ledger remain. |
-| `dc session purge ID` | Deletes the session if necessary, then removes its revision records, attachments, compilation jobs, and recall ledger. | Derived memories are separate packages. The change outbox retains operation metadata. |
-| `dc memory delete URI` | Writes a new revision with status `deleted`. The claim leaves memory search and recall. | The current claim and review history remain visible through `memory show URI` and `memory list --status deleted`; older revisions remain stored. |
-| `dc memory purge URI` | Removes a previously deleted claim's current package, revisions, search index entries, provenance links, and recall records. | The source session or document and change outbox metadata remain. |
+| Subcommand | Use |
+| --- | --- |
+| `create ID --concept CONCEPT_ID [--project ID]` | Create a dataset using a validated concept. |
+| `show ID` / `list [--project ID]` | Inspect the pinned concept and datasets. |
+| `add-fact ID ENTITY_TYPE ENTITY_ID PROPERTY JSON_VALUE` | Validate and store one fact with an exact citation. Supply `--unit` when the property defines one. |
+| `facts ID [--entity ENTITY_ID] [--property NAME]` | List or filter cited facts. |
 
-`memory purge` requires `memory delete` first. `session purge` can be called on
-an active or previously deleted session. Removing a source session causes
-dependent accepted memories with no other surviving citation to return to
-`proposed` for review; it does not purge those memory packages. Purging a memory
-does not erase its wording from a cited session or document. If that source is
-later compiled again, it can produce a new proposal.
+```sh
+uv run dc knowledge create khurmala-properties --concept formation-properties --project oilgas
+uv run dc knowledge add-fact khurmala-properties formation khurmala porosity 12.5 \
+  --unit '%' --source-uri docling://resources/library/DOC_ID \
+  --source-revision REVISION_ID --source-xpath '/doclang[1]/table[1]'
+uv run dc knowledge facts khurmala-properties --entity khurmala
+```
 
-Package blobs are content addressed and are removed by purge only when no
-remaining revision references them. The outbox retains earlier put/delete
-identifiers and operation metadata; purge does not clear it. Purge removes the
-item's stored content and revisions, but does not erase every related record.
+Facts must match the pinned entity type, property, value type, and unit. Every source citation identifies a document URI, immutable revision, and XPath. Existing datasets created without a concept remain readable but cannot receive new facts; create a concept-backed dataset to continue writing.
 
-`find` and `grep` are case-insensitive substring scans of current documents.
-They scan at most 1,000 documents, 2,000 nodes per document, and 50,000 nodes
-total, returning at most 100 hits. They accept
-an optional URI subtree scope and enforce tenant and user access. They do not
-yet provide embedding search or relevance ranking. When scoped to memory
-packages, they skip claims that are not accepted.
+## `index`
 
-`search` uses the SQLite retrieval index and returns exact DCLX citations.
-New or changed documents are indexed during ingestion. `index status` reports
-both lexical and vector coverage. `index lex status` and `index vector status`
-show each index separately. `index lex rebuild` regenerates the SQLite index
-from stored DCLX packages without rerunning conversion or OCR. It invalidates
-an existing vector snapshot; a configured embedding provider rebuilds it on its
-next use. Status and lexical rebuild honor the selected tenant and user scope.
+Inspect and rebuild search storage. Search does not repair stale indexes during a query.
 
-The CLI defaults to lexical search until a vector model has been built, then
-uses hybrid search. `--mode lexical|vector|hybrid` selects a mode explicitly.
-Install the `vectors` extra and run `dc index vector rebuild` to generate
-embeddings with the local default `BAAI/bge-small-en-v1.5` model.
-`--model MODEL` selects another supported FastEmbed text model;
-`Qdrant/clip-ViT-B-32` selects paired
-text and image encoders. The first build downloads model weights unless
-`--offline` is passed. On Apple Silicon, `--backend auto` selects MLX for
-supported BGE models and uses ONNX for other models. Use `--backend mlx` or
-`--backend onnx` to choose explicitly. MLX uses separate model weights and
-cannot be combined with `--offline`; `--backend auto --offline` uses ONNX.
-The selected backend is saved with the vector generation, so subsequent
-searches use the same encoder. Both lexical and vector rebuilds display a
-progress bar on interactive terminals; progress goes to stderr.
-After a vector build, document writes and deletes replay from the outbox on
-the next vector search. Missing or corrupt snapshots trigger a full rebuild.
-`dc index vector status` reports embedding coverage and the
-stored model. `search --image PATH --mode vector` accepts an image query with
-CLIP; text and image may be supplied together. A text-only model skips the
-image input. Vector builds currently require all documents in the store to be
-accessible to the selected principal because the snapshot is store-wide.
-With an image-capable model, referenced picture assets are indexed alongside
-text nodes. Search results include the picture XPath and asset path; image-only
-results show an image marker in the table. After upgrading an existing store,
-run `dc index lex rebuild` and `dc index vector rebuild` to add picture assets.
+```sh
+uv run dc index status
+uv run dc index lex rebuild
+uv run dc index vector rebuild
+```
 
-Use `--uri`, `--document`, and `--xpath` to restrict scope; repeat `--tier`
-to select context tiers. `-k`, `--max-tokens`, and `--per-result-tokens`
-control output size. It prints a compact table by default; pass `--json` for
-full citation records. See [scoped retrieval](retrieval.md) for the Python
-vector and hybrid API.
+`index lex status` and `index vector status` show the two indexes separately. Install the vector extra before building embeddings: `uv sync --extra vectors`.
+
+## `agent`
+
+Install or inspect the `/dc` skill and MCP connection in an agent. These commands do not launch an agent; `session start` does.
+
+```sh
+uv run dc agent install codex
+uv run dc agent status codex
+uv run dc agent install claude --scope project
+uv run dc agent install hermes
+uv run dc agent install pi --scope project
+uv run dc agent remove codex
+```
+
+See [agents.md](agents.md) for each agent's setup and the MCP workflow.

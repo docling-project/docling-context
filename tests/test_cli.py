@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import warnings
 
 import pytest
 from doclang import DocLangXDocument
@@ -14,6 +16,7 @@ from docling_context import (
     PdfConversionConfig,
     Principal,
 )
+from docling_context import cli as cli_module
 from docling_context.catalog import Catalog
 from docling_context.cli import main
 
@@ -45,7 +48,7 @@ def test_conversion_config_json_is_strict(tmp_path):
 
 def test_add_resource_help_describes_defaults(capsys):
     with pytest.raises(SystemExit) as exc:
-        main(["add-resource", "--help"])
+        main(["library", "add", "--help"])
     assert exc.value.code == 0
     help_text = " ".join(capsys.readouterr().out.split())
     for expected in (
@@ -69,7 +72,19 @@ def test_project_help_explains_subcommands(capsys):
     help_text = capsys.readouterr().out
     assert "Create a project" in help_text
     assert "List linked resources" in help_text
-    assert "Start a project session" in help_text
+    assert "Read and generate project context" in help_text
+    assert "session-start" not in help_text
+
+
+def test_bare_cli_shows_starting_points_and_legacy_route_is_absent(tmp_path, capsys):
+    assert main(["--store", str(tmp_path / "store")]) == 0
+    output = capsys.readouterr().out
+    assert "Create a project:" in output
+    assert "dc library add" in output
+    assert "dc session start" in output
+    with pytest.raises(SystemExit) as exc:
+        main(["--store", str(tmp_path / "store"), "add-resource", "paper.pdf"])
+    assert exc.value.code == 2
 
 
 def test_init_creates_local_catalog(tmp_path, capsys):
@@ -78,7 +93,7 @@ def test_init_creates_local_catalog(tmp_path, capsys):
     assert (root / "context.sqlite3").is_file()
     assert json.loads(capsys.readouterr().out)["catalog_schema_version"] == 1
     assert main(["--store", str(root), "overview"]) == 0
-    assert capsys.readouterr().out == "No records.\n"
+    assert capsys.readouterr().out.startswith("No records.\n")
 
 
 def test_cli_folder_scanning_supports_native_documents(
@@ -94,7 +109,7 @@ def test_cli_folder_scanning_supports_native_documents(
     (folder / "third.dclx").write_bytes(package.write_bytes())
     (nested / "fourth.dclg").write_text("<doclang><text>Fourth</text></doclang>")
     (folder / "ignored.bin").write_text("Ignored")
-    base = ["--store", str(tmp_path / "store"), "add-resource", str(folder), "--json"]
+    base = ["--store", str(tmp_path / "store"), "library", "add", str(folder), "--json"]
     assert main(base) == 0
     top_level = {
         json.loads(line)["uri"] for line in capsys.readouterr().out.splitlines()
@@ -111,7 +126,8 @@ def test_cli_folder_scanning_supports_native_documents(
             [
                 "--store",
                 str(tmp_path / "store"),
-                "add-resource",
+                "library",
+                "add",
                 str(folder / "first.dclg"),
                 "-r",
             ]
@@ -119,6 +135,103 @@ def test_cli_folder_scanning_supports_native_documents(
         == 1
     )
     assert "requires a folder" in capsys.readouterr().err
+
+
+def test_add_resource_resume_reports_existing_documents_and_suppresses_warnings(
+    tmp_path, capsys, monkeypatch, project_catalog
+):
+    folder = tmp_path / "sources"
+    folder.mkdir()
+    (folder / "first.dclg").write_text("<doclang><text>First</text></doclang>")
+    (folder / "second.dclg").write_text("<doclang><text>Second</text></doclang>")
+    command = ["--store", str(tmp_path / "store"), "library", "add", str(folder)]
+
+    progress: list[object] = []
+
+    class ProgressSpy:
+        def __init__(self, *args, total, desc, initial=0, **kwargs):
+            self.total = total
+            self.desc = desc
+            self.n = initial
+            self.initial = initial
+            self.postfixes: list[str] = []
+            progress.append(self)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, count):
+            self.n += count
+
+        def set_postfix_str(self, value):
+            self.postfixes.append(value)
+
+    monkeypatch.setattr(cli_module, "tqdm", ProgressSpy)
+    monkeypatch.setattr(
+        cli_module,
+        "_source_page_units",
+        lambda source, filename: 3 if source.name == "first.dclg" else 2,
+    )
+    original_add_resource = Ingestor.add_resource
+    calls = 0
+
+    def interrupt_second(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyboardInterrupt
+        warnings.warn("conversion warning", UserWarning, stacklevel=1)
+        logging.getLogger(__name__).warning("conversion log warning")
+        return original_add_resource(self, *args, **kwargs)
+
+    monkeypatch.setattr(Ingestor, "add_resource", interrupt_second)
+    assert main(command) == 130
+    interrupted = capsys.readouterr()
+    assert "3 of 5 pages" in interrupted.err
+    assert "conversion warning" not in interrupted.err
+    assert "conversion log warning" not in interrupted.err
+
+    positions_during_ingestion: list[int] = []
+
+    def observe_progress(self, *args, **kwargs):
+        positions_during_ingestion.append(progress[-1].n)
+        return original_add_resource(self, *args, **kwargs)
+
+    monkeypatch.setattr(Ingestor, "add_resource", observe_progress)
+    assert main(command) == 0
+    capsys.readouterr()
+    resumed = [item for item in progress if item.desc == "Importing pages"][-1]
+    assert resumed.total == 5
+    assert resumed.initial == 0
+    assert resumed.n == 5
+    assert positions_during_ingestion == [0, 3]
+    assert resumed.postfixes[0] == "existing=1 docs, added=0 docs"
+    assert resumed.postfixes[-1] == "existing=1 docs, added=1 docs"
+
+    positions_during_ingestion.clear()
+    assert main(command + ["--json"]) == 0
+    output = capsys.readouterr()
+    assert len([json.loads(line) for line in output.out.splitlines()]) == 2
+    assert "Importing pages" not in output.out
+    assert positions_during_ingestion == [0, 3]
+    assert progress[-1].n == 5
+
+
+def test_pdf_page_count_uses_pdf_pages_and_one_unit_for_other_sources(tmp_path):
+    pdfium = pytest.importorskip("pypdfium2")
+    pdf_path = tmp_path / "three-pages.pdf"
+    pdf = pdfium.PdfDocument.new()
+    for _ in range(3):
+        pdf.new_page(width=612, height=792)
+    pdf.save(pdf_path)
+    pdf.close()
+
+    assert cli_module._source_page_units(pdf_path, None) == 3
+    assert cli_module._source_page_units(pdf_path.read_bytes(), pdf_path.name) == 3
+    assert cli_module._source_page_units(tmp_path / "notes.dclg", None) == 1
 
 
 def test_cli_from_filter_and_filename_collisions(tmp_path, capsys, project_catalog):
@@ -129,7 +242,7 @@ def test_cli_from_filter_and_filename_collisions(tmp_path, capsys, project_catal
     assert document.read_xml("<doclang><text>Two</text></doclang>")
     (folder / "same.dclx").write_bytes(document.write_bytes())
     (folder / "other.pdf").write_bytes(b"%PDF")
-    base = ["--store", str(tmp_path / "store"), "add-resource", str(folder), "--json"]
+    base = ["--store", str(tmp_path / "store"), "library", "add", str(folder), "--json"]
     assert main(base + ["--from", "dclg", "--from", "dclx"]) == 0
     uris = {json.loads(line)["uri"] for line in capsys.readouterr().out.splitlines()}
     assert len(uris) == 2
@@ -151,15 +264,15 @@ def test_cli_import_worker_inspection_and_lexical_lookup(
     store = tmp_path / "store"
     base = ["--store", str(store)]
     assert main(base + ["overview"]) == 0
-    assert capsys.readouterr().out == "No records.\n"
+    assert capsys.readouterr().out.startswith("No records.\n")
     assert main(base + ["project", "create", "manuals", "--title", "Manuals"]) == 0
     project_table = capsys.readouterr().out
     assert "Project id" in project_table and "Manuals" in project_table
-    assert main(base + ["add-resource", str(source), "--project", "manuals"]) == 0
+    assert main(base + ["library", "add", str(source), "--project", "manuals"]) == 0
     import_table = capsys.readouterr().out
     assert "Uri" in import_table and "Revision Id" in import_table
     assert (
-        main(base + ["add-resource", str(source), "--project", "manuals", "--json"])
+        main(base + ["library", "add", str(source), "--project", "manuals", "--json"])
         == 0
     )
     added = json.loads(capsys.readouterr().out)
@@ -169,22 +282,31 @@ def test_cli_import_worker_inspection_and_lexical_lookup(
     overview_table = capsys.readouterr().out
     assert "Documents" in overview_table and "Manuals" in overview_table
     assert main(base + ["overview", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)[0]["documents"] == 1
-    assert main(base + ["ls", "docling://resources/"]) == 0
+    assert json.loads(capsys.readouterr().out)["projects"][0]["documents"] == 1
+    assert main(base + ["library", "list"]) == 0
     assert "docling://resources/library" in capsys.readouterr().out
-    assert main(base + ["tree", "docling://resources/library", "-L", "2"]) == 0
+    assert (
+        main(base + ["library", "tree", "docling://resources/library", "-L", "2"]) == 0
+    )
     assert added["uri"] in capsys.readouterr().out
     assert (
-        main(base + ["find", "glaciers", "--uri", "docling://resources/library"]) == 0
+        main(
+            base
+            + ["library", "find", "glaciers", "--uri", "docling://resources/library"]
+        )
+        == 0
     )
     assert "glaciers" in capsys.readouterr().out
-    assert main(base + ["grep", "blue", "--uri", "docling://resources/library"]) == 0
+    assert (
+        main(base + ["library", "grep", "blue", "--uri", "docling://resources/library"])
+        == 0
+    )
     assert "Blue glaciers" in capsys.readouterr().out
-    assert main(base + ["status"]) == 0
+    assert main(base + ["overview"]) == 0
     store_table = capsys.readouterr().out
     assert "Field" in store_table and "Documents" in store_table
-    assert main(base + ["status", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["documents"] == 1
+    assert main(base + ["overview", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["documents"] == 2
 
 
 def test_pdf_config_changes_ingestion_fingerprint(tmp_path):

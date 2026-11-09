@@ -18,9 +18,9 @@ With Python 3.12+ and `uv`:
 uv sync --extra conversion
 uv run dc init
 uv run dc project create research --title "Research"
-uv run dc add-resource ./paper.pdf --project research
+uv run dc library add ./paper.pdf --project research
 uv run dc overview
-uv run dc search "key finding" --project research
+uv run dc library search "key finding" --project research
 ```
 
 `dc init` creates the local store; no database server is needed. Set
@@ -29,9 +29,11 @@ import of the same source bytes reuses its library URI. Results carry a URI,
 revision ID, and XPath for exact citation. Use `--json` for machine-readable
 output; the default CLI output is tabular.
 
-To connect an agent, run `uv run docling-context integrate codex --scope project`
-and `uv run docling-context doctor codex --scope project`. The same installer
-supports Claude Code, Hermes, and Pi; see the [agent guide](docs/agents.md).
+To launch an agent in a project session, run
+`uv run dc session start --project research --agent codex`. To use Docling
+Context from an agent you start yourself, run `uv run dc agent install codex`
+and invoke its `dc` skill. Both flows support Claude Code, Hermes, and Pi; see
+the [agent guide](docs/agents.md).
 
 ## Development
 
