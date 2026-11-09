@@ -36,32 +36,32 @@ Install Python 3.12+ and `uv`, then run from this repository:
 ```bash
 uv sync --extra conversion
 uv run dc init
-uv run dc project create materials --title "Materials research"
-uv run dc library add ./paper.pdf --project materials
+uv run dc project create --project materials --title "Materials research"
+uv run dc library add --source ./paper.pdf --project materials
 uv run dc overview
-uv run dc library search "material properties" --project materials
+uv run dc library search --query "material properties" --project materials
 ```
 
 You can import a document directly from an HTTP(S) URL, including PDF URLs
 without a `.pdf` suffix:
 
 ```bash
-uv run dc library add https://arxiv.org/pdf/2608.23083 --project materials
+uv run dc library add --source https://arxiv.org/pdf/2608.23083 --project materials
 ```
 
 `library add` prints the canonical library URI and revision. It checks the
 source binary hash and reuses the existing library document on a repeat import,
 whether the source is a local file or a URL. Search results include URI,
 revision ID, and XPath. Read a result with
-`uv run dc library outline URI` and `uv run dc library show URI XPATH --revision REVISION_ID`.
+`uv run dc library outline --uri URI` and `uv run dc library show --uri URI --xpath XPATH --revision REVISION_ID`.
 Add `--json` to commands when an agent or script needs structured output.
 
 If you have no PDF, use a native DocLang source without the conversion extra:
 
 ```bash
 printf '<doclang><text>Basalt is an igneous rock.</text></doclang>' > basalt.dclg
-uv run dc library add ./basalt.dclg --project materials
-uv run dc library search basalt --project materials
+uv run dc library add --source ./basalt.dclg --project materials
+uv run dc library search --query basalt --project materials
 ```
 
 The default store is `~/.local/share/docling-context`. `dc init` creates its
@@ -83,7 +83,7 @@ the agent yourself. For Codex, invoke the skill with `$dc`; in Claude Code,
 Hermes, and Pi, use `/dc`:
 
 ```bash
-uv run dc agent install codex --scope project
+uv run dc agent install --agent codex --scope project
 codex
 ```
 

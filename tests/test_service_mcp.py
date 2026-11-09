@@ -65,6 +65,7 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
                     "library",
                     "jobs",
                     "status",
+                    "--id",
                     queued["job_id"],
                     "--json",
                 ]
@@ -108,7 +109,9 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
                     PRINCIPAL.user_id,
                     "library",
                     "show",
+                    "--uri",
                     URI,
+                    "--xpath",
                     "/doclang[1]/text[1]",
                     "--revision",
                     finished.revision_id,
@@ -134,7 +137,9 @@ def test_service_citations_survive_worker_restart(tmp_path, capsys):
             PRINCIPAL.user_id,
             "library",
             "show",
+            "--uri",
             URI,
+            "--xpath",
             "/doclang[1]/text[1]",
         ]
         assert dc_main(show_args) == 0

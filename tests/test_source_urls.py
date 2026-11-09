@@ -113,12 +113,26 @@ def test_url_import_reuses_library_document_and_links_project(
 
     monkeypatch.setattr("docling_context.cli.LocalDoclingConverter", Converter)
     base = ["--store", str(tmp_path / "store")]
-    assert main([*base, "project", "create", "materials", "--title", "Materials"]) == 0
+    assert (
+        main(
+            [
+                *base,
+                "project",
+                "create",
+                "--project",
+                "materials",
+                "--title",
+                "Materials",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
     command = [
         *base,
         "library",
         "add",
+        "--source",
         url,
         "--project",
         "materials",

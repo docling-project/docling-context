@@ -104,7 +104,12 @@ def test_cli_imports_nested_pdf_folder(tmp_path, capsys):
     with LocalContextStore(store) as local:
         catalog = Catalog(local)
         base = ["--store", str(store), "--tenant", tenant]
-        assert main([*base, "project", "create", "papers", "--title", "Papers"]) == 0
+        assert (
+            main(
+                [*base, "project", "create", "--project", "papers", "--title", "Papers"]
+            )
+            == 0
+        )
         capsys.readouterr()
         assert (
             main(
@@ -112,6 +117,7 @@ def test_cli_imports_nested_pdf_folder(tmp_path, capsys):
                     *base,
                     "library",
                     "add",
+                    "--source",
                     str(folder),
                     "--project",
                     "papers",

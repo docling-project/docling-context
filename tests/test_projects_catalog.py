@@ -38,13 +38,36 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
     catalog.create_project(principal, "beta", "Beta")
 
     assert (
-        main([*args, "library", "add", str(source), "--project", "alpha", "--json"])
+        main(
+            [
+                *args,
+                "library",
+                "add",
+                "--source",
+                str(source),
+                "--project",
+                "alpha",
+                "--json",
+            ]
+        )
         == 0
     )
     first = json.loads(capsys.readouterr().out)
     assert first["uri"].startswith("docling://resources/library/")
     assert (
-        main([*args, "library", "add", str(source), "--project", "beta", "--json"]) == 0
+        main(
+            [
+                *args,
+                "library",
+                "add",
+                "--source",
+                str(source),
+                "--project",
+                "beta",
+                "--json",
+            ]
+        )
+        == 0
     )
     second = json.loads(capsys.readouterr().out)
     assert second["uri"] == first["uri"]
@@ -78,6 +101,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
                 *args,
                 "library",
                 "search",
+                "--query",
                 "telescope",
                 "--project",
                 "alpha",
@@ -98,6 +122,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
                 *args,
                 "skill",
                 "create",
+                "--id",
                 "method",
                 "--from",
                 str(skill_source),
@@ -124,6 +149,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
                 *args,
                 "library",
                 "search",
+                "--query",
                 "telescope",
                 "--project",
                 "alpha",
@@ -162,7 +188,9 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
                 *args,
                 "session",
                 "append",
+                "--id",
                 "chat-1",
+                "--text",
                 "Remember: telescope evidence is reusable",
                 "--kind",
                 "turn",
@@ -173,7 +201,7 @@ def test_import_link_overview_and_scoped_search(catalog_scope, tmp_path, capsys)
         == 0
     )
     capsys.readouterr()
-    assert main([*args, "session", "close", "chat-1", "--json"]) == 0
+    assert main([*args, "session", "close", "--id", "chat-1", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "closed"
     assert catalog.overview(principal)[0]["sessions"] == 1
     assert main([*args, "memory", "worker", "--once", "--json"]) == 0
@@ -234,10 +262,34 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
         )
     )
     base = ["--store", str(root)]
-    assert main([*base, "project", "create", "materials", "--title", "Materials"]) == 0
+    assert (
+        main(
+            [
+                *base,
+                "project",
+                "create",
+                "--project",
+                "materials",
+                "--title",
+                "Materials",
+            ]
+        )
+        == 0
+    )
     capsys.readouterr()
     assert (
-        main([*base, "library", "add", str(source), "--project", "materials", "--json"])
+        main(
+            [
+                *base,
+                "library",
+                "add",
+                "--source",
+                str(source),
+                "--project",
+                "materials",
+                "--json",
+            ]
+        )
         == 0
     )
     library = json.loads(capsys.readouterr().out)
@@ -247,6 +299,7 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
                 *base,
                 "concept",
                 "create",
+                "--id",
                 "material-properties",
                 "--from",
                 str(descriptor),
@@ -266,6 +319,7 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
                 *base,
                 "knowledge",
                 "create",
+                "--id",
                 "materials",
                 "--concept",
                 "material-properties",
@@ -284,10 +338,15 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
                 *base,
                 "knowledge",
                 "add-fact",
+                "--uri",
                 knowledge["uri"],
+                "--entity-type",
                 "material",
+                "--entity-id",
                 "basalt",
+                "--property",
                 "density",
+                "--value",
                 "3.0",
                 "--source-uri",
                 library["uri"],
@@ -301,7 +360,7 @@ def test_typed_descriptors_and_cited_knowledge(tmp_path, capsys):
         == 0
     )
     assert json.loads(capsys.readouterr().out)["fact_id"]
-    assert main([*base, "knowledge", "facts", knowledge["uri"], "--json"]) == 0
+    assert main([*base, "knowledge", "facts", "--uri", knowledge["uri"], "--json"]) == 0
     facts = json.loads(capsys.readouterr().out)
     assert facts[0]["value"] == 3.0
     assert facts[0]["source_uri"] == library["uri"]
@@ -338,7 +397,10 @@ def test_concept_schema_required_and_dataset_revision_is_pinned(tmp_path, capsys
     base = ["--store", str(root)]
 
     assert (
-        main([*base, "concept", "create", "formation", "--from", str(descriptor)]) == 1
+        main(
+            [*base, "concept", "create", "--id", "formation", "--from", str(descriptor)]
+        )
+        == 1
     )
     assert "schema" in capsys.readouterr().err
     metadata.write_text(
@@ -355,6 +417,7 @@ def test_concept_schema_required_and_dataset_revision_is_pinned(tmp_path, capsys
         *base,
         "concept",
         "create",
+        "--id",
         "formation",
         "--from",
         str(descriptor),
@@ -370,6 +433,7 @@ def test_concept_schema_required_and_dataset_revision_is_pinned(tmp_path, capsys
                 *base,
                 "knowledge",
                 "create",
+                "--id",
                 "measurements",
                 "--concept",
                 "formation",
@@ -393,7 +457,7 @@ def test_concept_schema_required_and_dataset_revision_is_pinned(tmp_path, capsys
     )
     assert main(create) == 0
     assert json.loads(capsys.readouterr().out)["revision_id"] != first_revision
-    assert main([*base, "knowledge", "show", "measurements", "--json"]) == 0
+    assert main([*base, "knowledge", "show", "--uri", "measurements", "--json"]) == 0
     pinned = json.loads(capsys.readouterr().out)
     assert pinned["concept_revision"] == first_revision
     assert pinned["schema"]["properties"]["porosity"] == {"type": "number", "unit": "%"}
@@ -404,15 +468,31 @@ def test_library_relationship_commands(tmp_path, capsys):
     source = tmp_path / "source.dclg"
     source.write_text("<doclang><text>Shared document</text></doclang>")
     base = ["--store", str(root)]
-    assert main([*base, "project", "create", "alpha", "--title", "Alpha"]) == 0
+    assert (
+        main([*base, "project", "create", "--project", "alpha", "--title", "Alpha"])
+        == 0
+    )
     capsys.readouterr()
     assert (
-        main([*base, "library", "add", str(source), "--project", "alpha", "--json"])
+        main(
+            [
+                *base,
+                "library",
+                "add",
+                "--source",
+                str(source),
+                "--project",
+                "alpha",
+                "--json",
+            ]
+        )
         == 0
     )
     resource = json.loads(capsys.readouterr().out)
     document_id = resource["uri"].rsplit("/", 1)[-1]
-    assert main([*base, "library", "projects", document_id, "--json"]) == 0
+    assert (
+        main([*base, "library", "projects", "--document", document_id, "--json"]) == 0
+    )
     assert json.loads(capsys.readouterr().out)[0]["project_id"] == "alpha"
     assert (
         main(
@@ -420,7 +500,9 @@ def test_library_relationship_commands(tmp_path, capsys):
                 *base,
                 "library",
                 "link",
+                "--document",
                 document_id,
+                "--target",
                 resource["uri"],
                 "--relation",
                 "related",
@@ -430,7 +512,7 @@ def test_library_relationship_commands(tmp_path, capsys):
         == 0
     )
     capsys.readouterr()
-    assert main([*base, "library", "links", document_id, "--json"]) == 0
+    assert main([*base, "library", "links", "--document", document_id, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)[0]["relation"] == "related"
 
 
@@ -439,7 +521,10 @@ def test_project_context_jobs_refresh_after_membership_change(tmp_path, capsys):
     source = tmp_path / "source.dclg"
     source.write_text("<doclang><text>Basalt field notes</text></doclang>")
     base = ["--store", str(root)]
-    assert main([*base, "project", "create", "geology", "--title", "Geology"]) == 0
+    assert (
+        main([*base, "project", "create", "--project", "geology", "--title", "Geology"])
+        == 0
+    )
     capsys.readouterr()
     for _ in range(2):
         assert main([*base, "project", "context", "worker", "--json"]) == 0
@@ -448,9 +533,15 @@ def test_project_context_jobs_refresh_after_membership_change(tmp_path, capsys):
         project = Catalog(store).get_project(Principal("default", "local"), "geology")
         assert project.abstract_uri and project.overview_uri
         before = store.get_record(Principal("default", "local"), project.overview_uri)
-    assert main([*base, "library", "add", str(source), "--project", "geology"]) == 0
+    assert (
+        main([*base, "library", "add", "--source", str(source), "--project", "geology"])
+        == 0
+    )
     capsys.readouterr()
-    assert main([*base, "project", "context", "jobs", "geology", "--json"]) == 0
+    assert (
+        main([*base, "project", "context", "jobs", "--project", "geology", "--json"])
+        == 0
+    )
     assert {job["status"] for job in json.loads(capsys.readouterr().out)} == {"queued"}
     for _ in range(2):
         assert main([*base, "project", "context", "worker", "--json"]) == 0

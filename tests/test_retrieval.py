@@ -74,7 +74,9 @@ def test_vector_search_requires_saved_storage(tmp_path, capsys):
         with pytest.raises(VectorStorageUnavailable, match="dc index vector rebuild"):
             Retriever(store, embedder=WordVectors())
     command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
-    assert main([*command, "library", "search", "ice", "--mode", "vector"]) == 1
+    assert (
+        main([*command, "library", "search", "--query", "ice", "--mode", "vector"]) == 1
+    )
     assert "dc index vector rebuild" in capsys.readouterr().err
 
 
@@ -112,6 +114,7 @@ def test_stale_vector_search_warns_without_rebuilding(tmp_path, capsys, monkeypa
                     *command,
                     "library",
                     "search",
+                    "--query",
                     "ice",
                     "--mode",
                     "vector",
@@ -176,7 +179,10 @@ def test_search_warns_without_repairing_missing_lexical_records(tmp_path, capsys
         )
         assert service_result["warnings"] == list(result.warnings)
     command = ["--store", str(tmp_path), "--tenant", "north", "--user", "alice"]
-    assert main([*command, "library", "search", "fossil", "--mode", "lexical"]) == 0
+    assert (
+        main([*command, "library", "search", "--query", "fossil", "--mode", "lexical"])
+        == 0
+    )
     assert "dc index lex rebuild" in capsys.readouterr().err
 
 
@@ -334,6 +340,7 @@ def test_cli_search_warns_until_lexical_rebuild(tmp_path, capsys):
                 "alice",
                 "library",
                 "search",
+                "--query",
                 "fossil",
                 "--uri",
                 "docling://resources/notes",
@@ -354,6 +361,7 @@ def test_cli_search_warns_until_lexical_rebuild(tmp_path, capsys):
                 "alice",
                 "library",
                 "search",
+                "--query",
                 "fossil",
                 "--uri",
                 "docling://resources/notes",
@@ -407,6 +415,7 @@ def test_search_reports_matching_nodes_before_result_limit(tmp_path, capsys):
         "alice",
         "library",
         "search",
+        "--query",
         "fossil",
         "--uri",
         "docling://resources/notes",
@@ -415,7 +424,7 @@ def test_search_reports_matching_nodes_before_result_limit(tmp_path, capsys):
     ]
     assert main(command) == 0
     assert "Showing 1 of 3 matching nodes." in capsys.readouterr().out
-    assert main(command[:8] + ["missing"] + command[9:]) == 0
+    assert main(command[:9] + ["missing"] + command[10:]) == 0
     assert "Showing 0 of 0 matching nodes." in capsys.readouterr().out
 
 
@@ -940,7 +949,7 @@ def test_cli_vector_rebuild_search_and_scope_guard(tmp_path, capsys, monkeypatch
     assert "Vector model" in vector_table and "word-hash-1" in vector_table
     assert main([*command, "index", "vector", "status", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["vector_model"] == "word-hash-1"
-    assert main([*command, "library", "search", "glacier"]) == 0
+    assert main([*command, "library", "search", "--query", "glacier"]) == 0
     output = capsys.readouterr().out
     assert "Showing" in output and "ranked nodes" in output
     with LocalContextStore(tmp_path) as store:

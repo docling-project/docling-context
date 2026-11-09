@@ -44,7 +44,7 @@ Use this skill when the user invokes dc or asks to work with a Docling Context p
 
 For terminal work, use the canonical CLI groups: §dc library add/list/search/show§ for source documents, §dc project resources§ for membership, §dc memory§ for reviewed conclusions, §dc concept§ for schema definitions, and §dc knowledge§ for cited facts defined by a concept. §dc session start --project ID --agent {agent}§ launches an interactive session; do not run it from an already active agent session.
 
-If Docling Context MCP tools are missing, tell the user to run §dc agent install {agent}§ and restart this agent. Do not invent citations or claim that unrecorded turns were captured.
+If Docling Context MCP tools are missing, tell the user to run §dc agent install --agent {agent}§ and restart this agent. Do not invent citations or claim that unrecorded turns were captured.
 """
     return content.replace("§", chr(96))
 

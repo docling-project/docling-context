@@ -141,7 +141,9 @@ def _memory_rows(items: tuple[MemoryRecord, ...]) -> list[dict[str, object]]:
 def _session_id(value: str | None) -> str:
     session_id = value or os.environ.get("DOCLING_CONTEXT_SESSION")
     if not session_id:
-        raise ValueError("session ID required; pass it or set DOCLING_CONTEXT_SESSION")
+        raise ValueError(
+            "session ID required; pass --id (or --session) or set DOCLING_CONTEXT_SESSION"
+        )
     return session_id
 
 
@@ -166,17 +168,12 @@ def _timestamp_filter(value: str | None, *, upper: bool = False) -> str | None:
 
 def _input_text(args: argparse.Namespace, *, name: str = "text") -> str:
     value = getattr(args, name, None)
-    option = getattr(args, "text_option", None)
-    if option is not None:
-        if value is not None:
-            raise ValueError("use either positional text or --text")
-        value = option
     if args.stdin:
         if value is not None:
-            raise ValueError("use either text argument or --stdin")
+            raise ValueError(f"use either --{name} or --stdin")
         value = sys.stdin.read(20_001)
     if value is None:
-        raise ValueError("text argument or --stdin is required")
+        raise ValueError(f"--{name} or --stdin is required")
     return value
 
 
@@ -306,7 +303,7 @@ def _config(args: argparse.Namespace) -> PdfConversionConfig:
 
 def _add_resource(
     args: argparse.Namespace, store: LocalContextStore, principal: Principal
-) -> None:
+) -> int:
     from_url = is_source_url(args.source)
     extensions = _format_extensions()
     requested = {
@@ -364,23 +361,49 @@ def _add_resource(
             sources = [(data, fetched_filename, args.source)]
         else:
             sources = [(path, None, None) for path in paths]
+        # A single unreadable or unconvertible file must not abort a folder
+        # import: record it, keep going, and report every failure at the end.
+        keep_going = len(sources) > 1 and not args.fail_fast
+        failures: list[dict[str, str]] = []
+
+        def source_label(item: bytes | Path, filename: str | None) -> str:
+            if isinstance(item, Path):
+                return str(item.relative_to(base)) if base is not None else str(item)
+            return filename or "<download>"
+
+        def record_failure(label: str, exc: Exception) -> None:
+            message = str(exc) or type(exc).__name__
+            failures.append({"source": label, "error": message})
+            tqdm.write(f"dc: skipped {label}: {message}", file=sys.stderr)
+
+        checked: list[tuple[bytes | Path, str | None, str | None]] = []
         source_digests: list[str] = []
         existing_uris: list[str | None] = []
         page_units: list[int] = []
         progress_enabled = not args.json and sys.stderr.isatty()
         if progress_enabled:
             print("Counting pages and checking library...", file=sys.stderr)
-        for item, filename, _ in sources:
-            if isinstance(item, Path):
-                if item.stat().st_size > MAX_PACKAGE_BYTES:
-                    raise ValueError(f"source file is too large: {item}")
-                with item.open("rb") as source_file:
-                    digest = hashlib.file_digest(source_file, "sha256").hexdigest()
-            else:
-                digest = hashlib.sha256(item).hexdigest()
+        for item, filename, origin in sources:
+            try:
+                if isinstance(item, Path):
+                    if item.stat().st_size > MAX_PACKAGE_BYTES:
+                        raise ValueError(f"source file is too large: {item}")
+                    with item.open("rb") as source_file:
+                        digest = hashlib.file_digest(source_file, "sha256").hexdigest()
+                else:
+                    digest = hashlib.sha256(item).hexdigest()
+                existing = catalog.find_source(principal, digest)
+                units = _source_page_units(item, filename)
+            except (OSError, ValueError) as exc:
+                if not keep_going:
+                    raise
+                record_failure(source_label(item, filename), exc)
+                continue
+            checked.append((item, filename, origin))
             source_digests.append(digest)
-            existing_uris.append(catalog.find_source(principal, digest))
-            page_units.append(_source_page_units(item, filename))
+            existing_uris.append(existing)
+            page_units.append(units)
+        sources = checked
 
         already_in_library = sum(uri is not None for uri in existing_uris)
         total_page_units = sum(page_units)
@@ -412,21 +435,29 @@ def _add_resource(
                         f"existing={already_in_library} docs, "
                         f"added={len(newly_added)} docs, current={units} pages"
                     )
-                    with store.transaction():
-                        uri = (
-                            catalog.find_source(principal, digest) or new_document_uri()
-                        )
-                        record = ingestor.add_resource(
-                            principal,
-                            uri,
-                            item,
-                            filename=filename,
-                            origin_uri=origin_uri,
-                            force=args.force,
-                        )
-                        catalog.register_resource(principal, record)
-                        if args.project:
-                            catalog.link(principal, args.project, record.uri)
+                    try:
+                        with store.transaction():
+                            uri = (
+                                catalog.find_source(principal, digest)
+                                or new_document_uri()
+                            )
+                            record = ingestor.add_resource(
+                                principal,
+                                uri,
+                                item,
+                                filename=filename,
+                                origin_uri=origin_uri,
+                                force=args.force,
+                            )
+                            catalog.register_resource(principal, record)
+                            if args.project:
+                                catalog.link(principal, args.project, record.uri)
+                    except Exception as exc:
+                        if not keep_going:
+                            raise
+                        record_failure(source_label(item, filename), exc)
+                        bar.update(units)
+                        continue
                     imported.append(
                         {
                             "uri": record.uri,
@@ -458,6 +489,20 @@ def _add_resource(
             headers=("uri", "revision_id", "source_sha256", "project_id"),
             json_output=args.json,
         )
+        if failures:
+            if args.json:
+                for failure in failures:
+                    _json({"status": "failed", **failure})
+            print(
+                f"dc: {len(failures)} of {len(failures) + len(imported)} documents "
+                "failed and were skipped; fix them and rerun the command "
+                "(already imported documents are not converted again):",
+                file=sys.stderr,
+            )
+            for failure in failures:
+                print(f"  {failure['source']}: {failure['error']}", file=sys.stderr)
+            return 1
+        return 0
 
 
 def _scan(
@@ -567,20 +612,28 @@ def _parser() -> argparse.ArgumentParser:
     )
     project_commands = project.add_subparsers(dest="project_command", required=True)
     project_create = project_commands.add_parser("create", help="Create a project")
-    project_create.add_argument("project_id")
+    project_create.add_argument(
+        "--project", dest="project_id", required=True, help="Project ID"
+    )
     project_create.add_argument("--title", required=True)
     project_show = project_commands.add_parser("show", help="Show project details")
-    project_show.add_argument("project_id")
+    project_show.add_argument(
+        "--project", dest="project_id", required=True, help="Project ID"
+    )
     for name in ("link", "unlink"):
         command = project_commands.add_parser(
             name, help=f"{'Link' if name == 'link' else 'Unlink'} a shared resource"
         )
-        command.add_argument("project_id")
-        command.add_argument("uri")
+        command.add_argument(
+            "--project", dest="project_id", required=True, help="Project ID"
+        )
+        command.add_argument("--uri", required=True, help="Resource URI")
     project_list = project_commands.add_parser(
         "resources", help="List linked resources"
     )
-    project_list.add_argument("project_id")
+    project_list.add_argument(
+        "--project", dest="project_id", required=True, help="Project ID"
+    )
     context = project_commands.add_parser(
         "context", help="Read and generate project context"
     )
@@ -594,12 +647,16 @@ def _parser() -> argparse.ArgumentParser:
         sub = context_commands.add_parser(name, help=help_text)
         sub.set_defaults(project_command="context-show" if name == "show" else name)
         if name != "worker":
-            sub.add_argument("project_id")
+            sub.add_argument(
+                "--project", dest="project_id", required=True, help="Project ID"
+            )
         sub.add_argument("--json", action="store_true")
     context_set = context_commands.add_parser(
         "set", help="Set a project context document"
     )
-    context_set.add_argument("project_id")
+    context_set.add_argument(
+        "--project", dest="project_id", required=True, help="Project ID"
+    )
     context_set.add_argument("--description", type=Path)
     context_set.add_argument("--abstract", type=Path)
     context_set.add_argument("--overview", type=Path)
@@ -619,7 +676,9 @@ def _parser() -> argparse.ArgumentParser:
         create = typed_commands.add_parser(
             "create", help=f"Create a named {group} from DCLG or DCLX"
         )
-        create.add_argument("resource_id")
+        create.add_argument(
+            "--id", dest="resource_id", required=True, help=f"{group.title()} ID"
+        )
         create.add_argument("--from", dest="source", type=Path, required=True)
         create.add_argument(
             "--metadata", type=Path, help="Descriptor JSON; required for DCLG concepts"
@@ -639,9 +698,16 @@ def _parser() -> argparse.ArgumentParser:
             if name == "list":
                 sub.add_argument("--project")
             else:
-                sub.add_argument("resource_id")
+                sub.add_argument(
+                    "--id",
+                    dest="resource_id",
+                    required=True,
+                    help=f"{group.title()} ID",
+                )
             if name == "link":
-                sub.add_argument("target_uri")
+                sub.add_argument(
+                    "--target", dest="target_uri", required=True, help="Target URI"
+                )
                 sub.add_argument("--relation", required=True)
         for sub in typed_commands.choices.values():
             sub.add_argument("--json", action="store_true")
@@ -654,7 +720,9 @@ def _parser() -> argparse.ArgumentParser:
     knowledge_create = knowledge_commands.add_parser(
         "create", help="Create a dataset from a concept revision"
     )
-    knowledge_create.add_argument("resource_id")
+    knowledge_create.add_argument(
+        "--id", dest="resource_id", required=True, help="Dataset ID"
+    )
     knowledge_create.add_argument("--concept", required=True)
     knowledge_create.add_argument("--project")
     for name, help_text in (
@@ -665,18 +733,25 @@ def _parser() -> argparse.ArgumentParser:
         if name == "list":
             sub.add_argument("--project")
         else:
-            sub.add_argument("knowledge_uri")
+            sub.add_argument(
+                "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
+            )
     knowledge_add = knowledge_commands.add_parser(
         "add-fact", help="Add a schema-checked fact with an exact citation"
     )
-    for field in ("knowledge_uri", "entity_type", "entity_id", "property", "value"):
-        knowledge_add.add_argument(field)
+    knowledge_add.add_argument(
+        "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
+    )
+    for field in ("entity-type", "entity-id", "property", "value"):
+        knowledge_add.add_argument(f"--{field}", required=True)
     for field in ("source-uri", "source-revision", "source-xpath"):
         knowledge_add.add_argument(f"--{field}", required=True)
     knowledge_facts = knowledge_commands.add_parser(
         "facts", help="List facts in a knowledge dataset"
     )
-    knowledge_facts.add_argument("knowledge_uri")
+    knowledge_facts.add_argument(
+        "--uri", dest="knowledge_uri", required=True, help="Dataset URI"
+    )
     knowledge_facts.add_argument("--entity")
     knowledge_facts.add_argument("--property")
     knowledge_add.add_argument("--unit")
@@ -750,7 +825,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     add.set_defaults(command="add-resource")
     add.add_argument(
-        "source",
+        "--source",
+        required=True,
         help="A local document file, folder, or HTTP(S) URL; folders scan their top level by default.",
     )
     add.add_argument(
@@ -818,13 +894,19 @@ def _parser() -> argparse.ArgumentParser:
         help="Create a new revision for unchanged input (default: off).",
     )
     add.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop a folder import at the first failing document "
+        "(default: off; failures are skipped and reported at the end).",
+    )
+    add.add_argument(
         "--json", action="store_true", help="Print JSON lines instead of a table"
     )
     jobs = library_commands.add_parser("jobs", help="Inspect durable ingestion jobs")
     jobs.set_defaults(command="jobs")
     jobs_commands = jobs.add_subparsers(dest="jobs_command", required=True)
     jobs_status = jobs_commands.add_parser("status", help="Show one job by ID")
-    jobs_status.add_argument("job_id")
+    jobs_status.add_argument("--id", dest="job_id", required=True, help="Job ID")
     jobs_status.add_argument("--json", action="store_true")
     listing = library_commands.add_parser("list", help="List library documents")
     listing.set_defaults(command="library-list")
@@ -836,9 +918,16 @@ def _parser() -> argparse.ArgumentParser:
     ):
         sub = library_commands.add_parser(name, help=help_text)
         sub.set_defaults(command="library-relations")
-        sub.add_argument("document_id")
+        sub.add_argument(
+            "--document",
+            dest="document_id",
+            required=True,
+            help="Document ID or URI",
+        )
         if name == "link":
-            sub.add_argument("target_uri")
+            sub.add_argument(
+                "--target", dest="target_uri", required=True, help="Target URI"
+            )
             sub.add_argument("--relation", required=True)
         sub.add_argument("--json", action="store_true")
     listing.add_argument(
@@ -846,7 +935,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     tree = library_commands.add_parser("tree", help="Walk a context subtree")
     tree.set_defaults(command="tree")
-    tree.add_argument("uri", nargs="?", default="docling://resources/library/")
+    tree.add_argument(
+        "--uri",
+        default="docling://resources/library/",
+        help="Subtree URI (default: docling://resources/library/).",
+    )
     tree.add_argument("-L", "--depth", type=int, default=2)
     tree_output = tree.add_mutually_exclusive_group()
     tree_output.add_argument(
@@ -857,15 +950,15 @@ def _parser() -> argparse.ArgumentParser:
     )
     outline = library_commands.add_parser("outline", help="Read a document TOC sidecar")
     outline.set_defaults(command="outline")
-    outline.add_argument("uri")
+    outline.add_argument("--uri", required=True, help="Document URI or ID")
     outline.add_argument("--revision", help="Immutable document revision")
     outline_output = outline.add_mutually_exclusive_group()
     outline_output.add_argument("--json", action="store_true")
     outline_output.add_argument("--raw", action="store_true", help="Print TOC XML only")
     show = library_commands.add_parser("show", help="Read one cited DocLang node")
     show.set_defaults(command="show")
-    show.add_argument("uri")
-    show.add_argument("xpath")
+    show.add_argument("--uri", required=True, help="Document URI or ID")
+    show.add_argument("--xpath", required=True, help="DocLang node XPath")
     show.add_argument("--revision", help="Immutable document revision")
     show.add_argument("--format", choices=("text", "xml"), default="text")
     show.add_argument("--max-chars", type=int, default=8_192)
@@ -878,7 +971,7 @@ def _parser() -> argparse.ArgumentParser:
         search = library_commands.add_parser(name, help="Bounded lexical lookup")
         search.set_defaults(command=name)
         search.add_argument("--project")
-        search.add_argument("term")
+        search.add_argument("--term", required=True, help="Literal search term")
         search.add_argument("--uri", default="docling://resources/")
         search.add_argument(
             "--json", action="store_true", help="Print JSON lines instead of a table"
@@ -888,7 +981,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     retrieval.set_defaults(command="search")
     retrieval.add_argument(
-        "query", nargs="?", default="", help="Query text (optional with --image)."
+        "--query", default="", help="Query text (optional with --image)."
     )
     retrieval.add_argument(
         "--image", type=Path, help="Image query file (vector mode only)."
@@ -979,7 +1072,9 @@ def _parser() -> argparse.ArgumentParser:
     for name in ("show", "replay", "close", "delete", "purge", "jobs"):
         action = "List compilation jobs for" if name == "jobs" else f"{name.title()}"
         command = session_commands.add_parser(name, help=f"{action} one session")
-        command.add_argument("session_id", help="Session ID or full URI")
+        command.add_argument(
+            "--id", dest="session_id", required=True, help="Session ID or full URI"
+        )
         command.add_argument(
             "--json", action="store_true", help="Print JSON instead of a table"
         )
@@ -987,14 +1082,11 @@ def _parser() -> argparse.ArgumentParser:
         "append", help="Append one session event"
     )
     session_append.add_argument(
-        "session_id", nargs="?", help="ID or DOCLING_CONTEXT_SESSION"
+        "--id",
+        dest="session_id",
+        help="Session ID or full URI (default: DOCLING_CONTEXT_SESSION)",
     )
-    session_append.add_argument("text", nargs="?", help="Event text, or use --stdin")
-    session_append.add_argument(
-        "--text",
-        dest="text_option",
-        help="Event text, useful with DOCLING_CONTEXT_SESSION",
-    )
+    session_append.add_argument("--text", help="Event text, or use --stdin")
     session_append.add_argument(
         "--stdin", action="store_true", help="Read event text from stdin"
     )
@@ -1018,13 +1110,19 @@ def _parser() -> argparse.ArgumentParser:
     session_trim = session_commands.add_parser(
         "trim", help="Retain recent session events"
     )
-    session_trim.add_argument("session_id")
+    session_trim.add_argument(
+        "--id", dest="session_id", required=True, help="Session ID or full URI"
+    )
     session_trim.add_argument("--keep-last", type=int, required=True)
     session_attachment = session_commands.add_parser(
         "attachment", help="Save one event attachment"
     )
-    session_attachment.add_argument("session_id")
-    session_attachment.add_argument("key", help="Idempotency key of the attached event")
+    session_attachment.add_argument(
+        "--id", dest="session_id", required=True, help="Session ID or full URI"
+    )
+    session_attachment.add_argument(
+        "--key", required=True, help="Idempotency key of the attached event"
+    )
     session_attachment.add_argument("--output", type=Path, required=True)
     session_attachment.add_argument("--json", action="store_true")
     for command in (session_start, session_list, session_append, session_trim):
@@ -1071,15 +1169,15 @@ def _parser() -> argparse.ArgumentParser:
         )
     for name in ("show", "accept", "reject", "delete", "purge"):
         command = memory_commands.add_parser(name, help=f"{name.title()} one memory")
-        command.add_argument("uri")
+        command.add_argument("--uri", required=True, help="Memory URI")
         command.add_argument("--json", action="store_true")
         if name in {"reject", "delete"}:
             command.add_argument("--reason", default="")
     memory_correct = memory_commands.add_parser(
         "correct", help="Write an accepted correction"
     )
-    memory_correct.add_argument("uri")
-    memory_correct.add_argument("claim", nargs="?")
+    memory_correct.add_argument("--uri", required=True, help="Memory URI")
+    memory_correct.add_argument("--claim", help="Corrected claim, or use --stdin")
     memory_correct.add_argument("--stdin", action="store_true")
     memory_correct.add_argument("--explanation")
     memory_correct.add_argument("--json", action="store_true")
@@ -1087,10 +1185,13 @@ def _parser() -> argparse.ArgumentParser:
         "create", help="Create a user-authored claim"
     )
     memory_create.add_argument(
-        "kind", nargs="?", default="fact", choices=sorted(MEMORY_KINDS)
+        "--kind",
+        default="fact",
+        choices=sorted(MEMORY_KINDS),
+        help="Memory kind (default: fact)",
     )
     memory_create.add_argument("--from", dest="source", type=Path)
-    memory_create.add_argument("claim", nargs="?")
+    memory_create.add_argument("--claim", help="Claim text, or use --stdin or --from")
     memory_create.add_argument("--stdin", action="store_true")
     memory_create.add_argument("--explanation", default="")
     memory_create.add_argument("--subject")
@@ -1104,13 +1205,13 @@ def _parser() -> argparse.ArgumentParser:
         memory_create.add_argument(f"--source-{field.replace('_', '-')}")
     memory_create.add_argument("--json", action="store_true")
     memory_search = memory_commands.add_parser("search", help="Search accepted claims")
-    memory_search.add_argument("query", nargs="?", default="")
+    memory_search.add_argument("--query", default="", help="Query text")
     memory_search.add_argument("--limit", type=int, default=10)
     memory_search.add_argument("--json", action="store_true")
     memory_recall = memory_commands.add_parser(
         "recall", help="Recall claims once per session revision"
     )
-    memory_recall.add_argument("query", nargs="?", default="")
+    memory_recall.add_argument("--query", default="", help="Query text")
     memory_recall.add_argument("--session", help="ID or DOCLING_CONTEXT_SESSION")
     memory_recall.add_argument("--limit", type=int, default=10)
     memory_recall.add_argument("--json", action="store_true")
@@ -1124,7 +1225,9 @@ def _parser() -> argparse.ArgumentParser:
     memory_jobs = memory_commands.add_parser(
         "jobs", help="List compilation jobs for a session"
     )
-    memory_jobs.add_argument("session_id")
+    memory_jobs.add_argument(
+        "--session", dest="session_id", required=True, help="Session ID or full URI"
+    )
     memory_jobs.add_argument("--limit", type=int, default=100)
     memory_jobs.add_argument("--json", action="store_true")
     for sub in (memory_list, memory_create, memory_search, memory_recall):
@@ -1139,7 +1242,7 @@ def _parser() -> argparse.ArgumentParser:
         ("remove", "Remove the managed skill and MCP connection"),
     ):
         sub = agent_commands.add_parser(action, help=help_text)
-        sub.add_argument("agent", choices=AGENTS)
+        sub.add_argument("--agent", choices=AGENTS, required=True)
         sub.add_argument("--scope", choices=("user", "project"), default="user")
         sub.add_argument("--project-root", type=Path, default=Path.cwd())
         sub.add_argument(
@@ -1745,7 +1848,7 @@ def main(argv: list[str] | None = None) -> int:
                 _status(counts, json_output=False)
                 if bare:
                     print(
-                        '\nCreate a project: dc project create materials --title "Materials"\nAdd documents:    dc library add ./papers --project materials\nStart an agent:   dc session start --project materials --agent codex'
+                        '\nCreate a project: dc project create --project materials --title "Materials"\nAdd documents:    dc library add --source ./papers --project materials\nStart an agent:   dc session start --project materials --agent codex'
                     )
             return 0
         with LocalContextStore(args.store) as store:
@@ -2017,7 +2120,8 @@ def main(argv: list[str] | None = None) -> int:
                     previous_logging_disable = logging.root.manager.disable
                     logging.disable(logging.WARNING)
                     try:
-                        _add_resource(args, store, principal)
+                        if _add_resource(args, store, principal):
+                            return 1
                     finally:
                         logging.disable(previous_logging_disable)
             elif args.command == "session":

@@ -3,7 +3,7 @@
 `dc library search` uses the local SQLite index and works without an embedding model:
 
 ```bash
-uv run dc library search "glacier" --project climate \
+uv run dc library search --query "glacier" --project climate \
   --xpath '/doclang[1]/text[1]' -k 5 --max-tokens 1000
 ```
 

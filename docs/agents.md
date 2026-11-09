@@ -8,8 +8,8 @@ examples use the default store at `~/.local/share/docling-context`.
 ```bash
 uv sync --extra conversion
 uv run dc init
-uv run dc project create papers --title "Paper review"
-uv run dc library add ./paper.pdf --project papers
+uv run dc project create --project papers --title "Paper review"
+uv run dc library add --source ./paper.pdf --project papers
 ```
 
 There are two ways to work with an agent:
@@ -17,7 +17,7 @@ There are two ways to work with an agent:
 | Route | Start with | Session handling |
 | --- | --- | --- |
 | Launch the agent from `dc` | `dc session start --project papers --agent AGENT` | `dc` creates and closes the project session around the agent process. |
-| Start the agent yourself | `dc agent install AGENT`, then invoke its `dc` skill | The skill instructs the agent to create, record, and close a project session through MCP. |
+| Start the agent yourself | `dc agent install --agent AGENT`, then invoke its `dc` skill | The skill instructs the agent to create, record, and close a project session through MCP. |
 
 ## Launch an agent from `dc`
 
@@ -40,8 +40,8 @@ queued memory compilation job with:
 
 ```bash
 uv run dc session list --project papers
-uv run dc session show docling://projects/papers/sessions/SESSION_ID
-uv run dc session jobs docling://projects/papers/sessions/SESSION_ID
+uv run dc session show --id docling://projects/papers/sessions/SESSION_ID
+uv run dc session jobs --id docling://projects/papers/sessions/SESSION_ID
 uv run dc memory worker --once
 uv run dc memory proposals
 ```
@@ -73,17 +73,17 @@ working directory. Project scope is relative to the current directory (or
 currently supports user scope for MCP.
 
 ```bash
-uv run dc agent install codex --scope project
-uv run dc agent status codex --scope project
+uv run dc agent install --agent codex --scope project
+uv run dc agent status --agent codex --scope project
 
-uv run dc agent install claude --scope project
-uv run dc agent status claude --scope project
+uv run dc agent install --agent claude --scope project
+uv run dc agent status --agent claude --scope project
 
-uv run dc agent install hermes
-uv run dc agent status hermes
+uv run dc agent install --agent hermes
+uv run dc agent status --agent hermes
 
-uv run dc agent install pi --scope project
-uv run dc agent status pi --scope project
+uv run dc agent install --agent pi --scope project
+uv run dc agent status --agent pi --scope project
 ```
 
 Restart the agent after installation. Invoke the skill and name the Docling
@@ -100,19 +100,19 @@ Codex also exposes the skill through `/skills`; the [official Codex skill guide]
 documents this syntax. The installed skill instructs the agent to select a
 project, start a project session through MCP, search its linked resources,
 record useful outcomes, and close the session. Verify what was recorded with
-`dc session list --project papers` and `dc session replay SESSION_URI`.
+`dc session list --project papers` and `dc session replay --id SESSION_URI`.
 `dc session start --project papers --agent codex` launches Codex in the current terminal;
 `--no-launch` creates only the project session record.
 
 If an agent is already running and you want to supply a session yourself, run
 `dc session start --project papers --agent codex --no-launch`. This creates an
 open session but does not install or launch the agent. Give the returned full
-URI to the agent, then run `dc session close SESSION_URI` when finished. The
+URI to the agent, then run `dc session close --id SESSION_URI` when finished. The
 skill leaves launcher-provided sessions open for the launcher to close.
 
-`dc agent status AGENT` checks that the managed skill and MCP configuration are
+`dc agent status --agent AGENT` checks that the managed skill and MCP configuration are
 present; it does not open an MCP connection. Run `docling-context doctor AGENT`
-with the same `--scope` to check the connection. `dc agent remove AGENT`
+with the same `--scope` to check the connection. `dc agent remove --agent AGENT`
 removes the owned skill and MCP entry. The lower-level `docling-context
 integrate`, `doctor`, and `remove` commands remain available for MCP-only or
 remote configurations; those commands do not install the skill.
@@ -183,7 +183,7 @@ when requested. Run `docling-context ingest-worker` alongside the agent, or
 running, completed, or failed state and the resulting revision. Jobs survive
 server and worker restarts. Larger documents can be imported with
 `dc library add`, which converts synchronously and indexes the result. Use
-`dc library jobs status JOB_ID` to inspect either job type; add `--json` for a record.
+`dc library jobs status --id JOB_ID` to inspect either job type; add `--json` for a record.
 Queued Docling conversions use a five-minute document timeout.
 
 ## Remote service

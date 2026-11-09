@@ -17,10 +17,10 @@ With Python 3.12+ and `uv`:
 ```bash
 uv sync --extra conversion
 uv run dc init
-uv run dc project create research --title "Research"
-uv run dc library add ./paper.pdf --project research
+uv run dc project create --project research --title "Research"
+uv run dc library add --source ./paper.pdf --project research
 uv run dc overview
-uv run dc library search "key finding" --project research
+uv run dc library search --query "key finding" --project research
 ```
 
 `dc init` creates the local store; no database server is needed. Set
@@ -31,7 +31,7 @@ output; the default CLI output is tabular.
 
 To launch an agent in a project session, run
 `uv run dc session start --project research --agent codex`. To use Docling
-Context from an agent you start yourself, run `uv run dc agent install codex`
+Context from an agent you start yourself, run `uv run dc agent install --agent codex`
 and invoke its `dc` skill. Both flows support Claude Code, Hermes, and Pi; see
 the [agent guide](docs/agents.md).
 

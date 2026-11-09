@@ -48,6 +48,6 @@ OCR, table, chart, code, formula, and text options to the service. Local limits
 such as `max_pages`, model artifact paths, and image generation settings are
 not enforced by the service adapter; configure those on the service separately.
 Only explicit HTTPS or loopback HTTP conversion-service endpoints are accepted,
-and redirects are rejected by that adapter. Separately, `dc library add URL`
+and redirects are rejected by that adapter. Separately, `dc library add --source URL`
 downloads an explicitly supplied HTTP(S) source into bounded local bytes before
 using the local converter. See the [CLI guide](cli.md) for URL limits.

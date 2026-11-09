@@ -19,7 +19,7 @@ the source hash within the tenant before conversion and reuses the library URI
 when it exists. `--force` writes a new revision. Revision provenance records
 the original filename, origin, converter, options, and warnings.
 
-Use `dc library add SOURCE` for original documents, `dc skill create` for methods,
+Use `dc library add --source SOURCE` for original documents, `dc skill create` for methods,
 `dc concept create` for definitions, `dc memory create` for conclusions, and
 `dc knowledge create` for a dataset of cited facts. A concept has a mandatory
 schema in its DCLX descriptor. Each knowledge dataset pins the concept URI and
@@ -30,7 +30,7 @@ links between datasets and concepts are recorded in SQLite.
 
 ## Projects
 
-`dc project create ID --title TITLE` creates a project and links the shared
+`dc project create --project ID --title TITLE` creates a project and links the shared
 `docling://resources/skills/doclang-authoring` skill. The skill explains how
 to write and validate DCLG XML and DCLX packages. It is required for every
 project, including projects already present when a store is opened. `project
@@ -40,13 +40,13 @@ resource.
 projects linked to a typed resource. `project context set` attaches
 project-owned DCLX documents. Project creation,
 membership changes, and description changes queue abstract and overview
-refresh jobs. Run `dc project context worker` to process one, `dc project context jobs ID` to
-inspect them, or `dc project context refresh ID` to queue another refresh. The generated
+refresh jobs. Run `dc project context worker` to process one, `dc project context jobs --project ID` to
+inspect them, or `dc project context refresh --project ID` to queue another refresh. The generated
 abstract and overview contain the title, optional description, resource counts,
 and URI inventory; they do not summarize source document contents.
 
 `dc overview` includes projects with no links and counts each linked resource
-once. `dc library search QUERY --project ID` restricts retrieval to linked resources.
+once. `dc library search --query QUERY --project ID` restricts retrieval to linked resources.
 Results cite canonical URI, immutable revision ID, and XPath.
 
 Project sessions live at `docling://projects/{project_id}/sessions/{id}`.

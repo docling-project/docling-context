@@ -61,7 +61,14 @@ def test_agent_cli_install_status_remove(tmp_path, capsys):
         str(tmp_path / "store"),
         "agent",
     ]
-    options = ["codex", "--scope", "project", "--project-root", str(tmp_path)]
+    options = [
+        "--agent",
+        "codex",
+        "--scope",
+        "project",
+        "--project-root",
+        str(tmp_path),
+    ]
     assert main([*args, "install", *options, "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "installed"
     assert main([*args, "status", *options, "--json"]) == 0

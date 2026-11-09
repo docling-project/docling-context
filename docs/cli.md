@@ -16,9 +16,9 @@
 ```sh
 uv sync --all-extras
 uv run dc init
-uv run dc project create materials --title 'Materials Research'
-uv run dc library add ./paper.pdf --project materials
-uv run dc library search 'porous materials' --project materials
+uv run dc project create --project materials --title 'Materials Research'
+uv run dc library add --source ./paper.pdf --project materials
+uv run dc library search --query 'porous materials' --project materials
 uv run dc session start --project materials --agent codex
 ```
 
@@ -52,10 +52,10 @@ Projects define topics and membership. Every project links the shared `doclang-a
 | `context jobs ID` / `context worker` | Inspect or process regeneration jobs. |
 
 ```sh
-uv run dc project create oilgas --title 'Oil and Gas'
-uv run dc project link oilgas docling://resources/library/DOC_ID
-uv run dc project resources oilgas
-uv run dc project context set oilgas --description ./description.dclx
+uv run dc project create --project oilgas --title 'Oil and Gas'
+uv run dc project link --project oilgas --uri docling://resources/library/DOC_ID
+uv run dc project resources --project oilgas
+uv run dc project context set --project oilgas --description ./description.dclx
 uv run dc project context worker
 ```
 
@@ -79,12 +79,12 @@ The library owns original source documents and their discovery. Imported content
 | `jobs status JOB_ID` | Inspect an asynchronous ingestion job created by an agent or API. |
 
 ```sh
-uv run dc library add ./papers -r --project oilgas
-uv run dc library add 'https://example.org/paper.pdf' --project oilgas
+uv run dc library add --source ./papers -r --project oilgas
+uv run dc library add --source 'https://example.org/paper.pdf' --project oilgas
 uv run dc library list --project oilgas
-uv run dc library search 'Khurmala diagenesis' --project oilgas --mode hybrid
-uv run dc library outline DOC_ID
-uv run dc library show DOC_ID '/doclang[1]/text[1]'
+uv run dc library search --query 'Khurmala diagenesis' --project oilgas --mode hybrid
+uv run dc library outline --uri DOC_ID
+uv run dc library show --uri DOC_ID --xpath '/doclang[1]/text[1]'
 ```
 
 `library add` converts synchronously. Its terminal progress bar counts PDF pages and advances after each document is reused or converted and committed. Other source types count as one unit. The bar reaches 100% after the whole import finishes; restart the same command after interruption. Conversion settings are in [conversion.md](conversion.md). `--json` keeps import output as JSON lines and hides the progress bar.
@@ -109,8 +109,8 @@ One session command family handles both interactive and manual sessions. `start`
 uv run dc session start --project oilgas --agent claude
 uv run dc session start --project oilgas --agent codex --no-launch
 uv run dc session list --project oilgas
-uv run dc session append SESSION_ID 'Reviewed section 2' --kind turn --key review-1
-uv run dc session close SESSION_ID
+uv run dc session append --id SESSION_ID --text 'Reviewed section 2' --kind turn --key review-1
+uv run dc session close --id SESSION_ID
 ```
 
 A returned session ID works directly if it uniquely identifies one of your project sessions. Use the full session URI when IDs are ambiguous. Agents record useful outcomes through MCP; the launcher does not automatically copy the agent's complete conversation. See [sessions.md](sessions.md) and [agents.md](agents.md).
@@ -132,8 +132,8 @@ A memory is a durable conclusion or synthesis. Session compilation can propose o
 ```sh
 uv run dc memory create --from ./diagenesis-summary.dclx --project oilgas
 uv run dc memory list --project oilgas
-uv run dc memory search 'Khurmala' --project oilgas
-uv run dc memory accept MEMORY_ID
+uv run dc memory search --query 'Khurmala' --project oilgas
+uv run dc memory accept --uri MEMORY_ID
 uv run dc memory worker --once
 ```
 
@@ -156,11 +156,11 @@ A concept defines what facts mean. Create one from a DCLG or DCLX document and a
 ```
 
 ```sh
-uv run dc concept create formation-properties --from ./formation-properties.dclg \
+uv run dc concept create --id formation-properties --from ./formation-properties.dclg \
   --metadata ./formation-properties.json --project oilgas
-uv run dc concept show formation-properties
+uv run dc concept show --id formation-properties
 uv run dc concept list --project oilgas
-uv run dc concept projects formation-properties
+uv run dc concept projects --id formation-properties
 ```
 
 `create` also accepts a DCLX that already contains `context/concept.json`. Both sources are validated before storage. `links` and `link` inspect or create relationships with other resources.
@@ -170,8 +170,8 @@ uv run dc concept projects formation-properties
 Skills are shared, named DCLX methods. Create one from DCLG or DCLX, optionally supplying descriptor JSON with a name and summary. Every project automatically links `doclang-authoring`.
 
 ```sh
-uv run dc skill create sampling-method --from ./sampling-method.dclx --project oilgas
-uv run dc skill show sampling-method
+uv run dc skill create --id sampling-method --from ./sampling-method.dclx --project oilgas
+uv run dc skill show --id sampling-method
 uv run dc skill list --project oilgas
 ```
 
@@ -189,11 +189,11 @@ A knowledge dataset contains individually cited facts in SQLite and a DCLX descr
 | `facts ID [--entity ENTITY_ID] [--property NAME]` | List or filter cited facts. |
 
 ```sh
-uv run dc knowledge create khurmala-properties --concept formation-properties --project oilgas
-uv run dc knowledge add-fact khurmala-properties formation khurmala porosity 12.5 \
+uv run dc knowledge create --id khurmala-properties --concept formation-properties --project oilgas
+uv run dc knowledge add-fact --uri khurmala-properties --entity-type formation --entity-id khurmala --property porosity --value 12.5 \
   --unit '%' --source-uri docling://resources/library/DOC_ID \
   --source-revision REVISION_ID --source-xpath '/doclang[1]/table[1]'
-uv run dc knowledge facts khurmala-properties --entity khurmala
+uv run dc knowledge facts --uri khurmala-properties --entity khurmala
 ```
 
 Facts must match the pinned entity type, property, value type, and unit. Every source citation identifies a document URI, immutable revision, and XPath. Existing datasets created without a concept remain readable but cannot receive new facts; create a concept-backed dataset to continue writing.
@@ -215,12 +215,12 @@ uv run dc index vector rebuild
 Install or inspect the `/dc` skill and MCP connection in an agent. These commands do not launch an agent; `session start` does.
 
 ```sh
-uv run dc agent install codex
-uv run dc agent status codex
-uv run dc agent install claude --scope project
-uv run dc agent install hermes
-uv run dc agent install pi --scope project
-uv run dc agent remove codex
+uv run dc agent install --agent codex
+uv run dc agent status --agent codex
+uv run dc agent install --agent claude --scope project
+uv run dc agent install --agent hermes
+uv run dc agent install --agent pi --scope project
+uv run dc agent remove --agent codex
 ```
 
 See [agents.md](agents.md) for each agent's setup and the MCP workflow.

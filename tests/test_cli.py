@@ -109,7 +109,15 @@ def test_cli_folder_scanning_supports_native_documents(
     (folder / "third.dclx").write_bytes(package.write_bytes())
     (nested / "fourth.dclg").write_text("<doclang><text>Fourth</text></doclang>")
     (folder / "ignored.bin").write_text("Ignored")
-    base = ["--store", str(tmp_path / "store"), "library", "add", str(folder), "--json"]
+    base = [
+        "--store",
+        str(tmp_path / "store"),
+        "library",
+        "add",
+        "--source",
+        str(folder),
+        "--json",
+    ]
     assert main(base) == 0
     top_level = {
         json.loads(line)["uri"] for line in capsys.readouterr().out.splitlines()
@@ -128,6 +136,7 @@ def test_cli_folder_scanning_supports_native_documents(
                 str(tmp_path / "store"),
                 "library",
                 "add",
+                "--source",
                 str(folder / "first.dclg"),
                 "-r",
             ]
@@ -144,7 +153,14 @@ def test_add_resource_resume_reports_existing_documents_and_suppresses_warnings(
     folder.mkdir()
     (folder / "first.dclg").write_text("<doclang><text>First</text></doclang>")
     (folder / "second.dclg").write_text("<doclang><text>Second</text></doclang>")
-    command = ["--store", str(tmp_path / "store"), "library", "add", str(folder)]
+    command = [
+        "--store",
+        str(tmp_path / "store"),
+        "library",
+        "add",
+        "--source",
+        str(folder),
+    ]
 
     progress: list[object] = []
 
@@ -242,7 +258,15 @@ def test_cli_from_filter_and_filename_collisions(tmp_path, capsys, project_catal
     assert document.read_xml("<doclang><text>Two</text></doclang>")
     (folder / "same.dclx").write_bytes(document.write_bytes())
     (folder / "other.pdf").write_bytes(b"%PDF")
-    base = ["--store", str(tmp_path / "store"), "library", "add", str(folder), "--json"]
+    base = [
+        "--store",
+        str(tmp_path / "store"),
+        "library",
+        "add",
+        "--source",
+        str(folder),
+        "--json",
+    ]
     assert main(base + ["--from", "dclg", "--from", "dclx"]) == 0
     uris = {json.loads(line)["uri"] for line in capsys.readouterr().out.splitlines()}
     assert len(uris) == 2
@@ -265,14 +289,31 @@ def test_cli_import_worker_inspection_and_lexical_lookup(
     base = ["--store", str(store)]
     assert main(base + ["overview"]) == 0
     assert capsys.readouterr().out.startswith("No records.\n")
-    assert main(base + ["project", "create", "manuals", "--title", "Manuals"]) == 0
+    assert (
+        main(base + ["project", "create", "--project", "manuals", "--title", "Manuals"])
+        == 0
+    )
     project_table = capsys.readouterr().out
     assert "Project id" in project_table and "Manuals" in project_table
-    assert main(base + ["library", "add", str(source), "--project", "manuals"]) == 0
+    assert (
+        main(base + ["library", "add", "--source", str(source), "--project", "manuals"])
+        == 0
+    )
     import_table = capsys.readouterr().out
     assert "Uri" in import_table and "Revision Id" in import_table
     assert (
-        main(base + ["library", "add", str(source), "--project", "manuals", "--json"])
+        main(
+            base
+            + [
+                "library",
+                "add",
+                "--source",
+                str(source),
+                "--project",
+                "manuals",
+                "--json",
+            ]
+        )
         == 0
     )
     added = json.loads(capsys.readouterr().out)
@@ -286,19 +327,40 @@ def test_cli_import_worker_inspection_and_lexical_lookup(
     assert main(base + ["library", "list"]) == 0
     assert "docling://resources/library" in capsys.readouterr().out
     assert (
-        main(base + ["library", "tree", "docling://resources/library", "-L", "2"]) == 0
+        main(
+            base
+            + ["library", "tree", "--uri", "docling://resources/library", "-L", "2"]
+        )
+        == 0
     )
     assert added["uri"] in capsys.readouterr().out
     assert (
         main(
             base
-            + ["library", "find", "glaciers", "--uri", "docling://resources/library"]
+            + [
+                "library",
+                "find",
+                "--term",
+                "glaciers",
+                "--uri",
+                "docling://resources/library",
+            ]
         )
         == 0
     )
     assert "glaciers" in capsys.readouterr().out
     assert (
-        main(base + ["library", "grep", "blue", "--uri", "docling://resources/library"])
+        main(
+            base
+            + [
+                "library",
+                "grep",
+                "--term",
+                "blue",
+                "--uri",
+                "docling://resources/library",
+            ]
+        )
         == 0
     )
     assert "Blue glaciers" in capsys.readouterr().out
@@ -336,3 +398,49 @@ def test_pdf_config_changes_ingestion_fingerprint(tmp_path):
         )
         assert repeated.revision_id == first.revision_id
         assert changed.revision_id != first.revision_id
+
+
+def test_folder_import_skips_failing_documents_and_reports_them(
+    tmp_path, capsys, project_catalog
+):
+    folder = tmp_path / "sources"
+    folder.mkdir()
+    (folder / "a_broken.dclg").write_text("<doclang><text>unclosed</doclang>")
+    (folder / "b_good.dclg").write_text("<doclang><text>Good</text></doclang>")
+    base = [
+        "--store",
+        str(tmp_path / "store"),
+        "library",
+        "add",
+        "--source",
+        str(folder),
+    ]
+
+    assert main(base + ["--json"]) == 1
+    captured = capsys.readouterr()
+    rows = [json.loads(line) for line in captured.out.splitlines()]
+    imported = [row for row in rows if "uri" in row]
+    failed = [row for row in rows if row.get("status") == "failed"]
+    assert len(imported) == 1
+    assert [row["source"] for row in failed] == ["a_broken.dclg"]
+    assert "1 of 2 documents failed" in captured.err
+
+    assert main(base + ["--json", "--fail-fast"]) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("dc: ")
+
+
+def test_cli_has_no_positional_arguments():
+    """Every value is passed by name; only subcommand names are positional."""
+    import argparse
+
+    def positionals(parser, path):
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, sub in action.choices.items():
+                    yield from positionals(sub, [*path, name])
+            elif not action.option_strings:
+                yield f"dc {' '.join(path)} <{action.dest}>"
+
+    assert list(positionals(cli_module._parser(), [])) == []

@@ -44,19 +44,35 @@ def test_authored_memory_preserves_body_and_project_scope(tmp_path, capsys):
     assert code == 0, error
     memory = json.loads(output)
     code, output, error = _run(
-        capsys, root, "memory", "accept", memory["uri"], "--json"
+        capsys, root, "memory", "accept", "--uri", memory["uri"], "--json"
     )
     assert code == 0, error
     with LocalContextStore(root) as store:
         document = store.get_document(principal, memory["uri"])
         assert "Evidence from the formation study." in document.xml()
     code, output, error = _run(
-        capsys, root, "memory", "search", "Khurmala", "--project", "oilgas", "--json"
+        capsys,
+        root,
+        "memory",
+        "search",
+        "--query",
+        "Khurmala",
+        "--project",
+        "oilgas",
+        "--json",
     )
     assert code == 0, error
     assert len(json.loads(output)) == 1
     code, output, error = _run(
-        capsys, root, "memory", "search", "Khurmala", "--project", "materials", "--json"
+        capsys,
+        root,
+        "memory",
+        "search",
+        "--query",
+        "Khurmala",
+        "--project",
+        "materials",
+        "--json",
     )
     assert code == 0, error
     assert json.loads(output) == []
@@ -100,7 +116,9 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
         capsys, tmp_path, "session", "list", "--offset", "1", "--json"
     )
     assert code == 0 and json.loads(output) == []
-    code, output, _ = _run(capsys, tmp_path, "session", "replay", "chat", "--json")
+    code, output, _ = _run(
+        capsys, tmp_path, "session", "replay", "--id", "chat", "--json"
+    )
     assert code == 0
     assert json.loads(output)[0]["text"] == "Remember: I prefer concise replies"
     restored = tmp_path / "restored.bin"
@@ -110,7 +128,9 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
             tmp_path,
             "session",
             "attachment",
+            "--id",
             "chat",
+            "--key",
             "feedback-1",
             "--output",
             str(restored),
@@ -129,18 +149,21 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
             "bob",
             "session",
             "show",
+            "--id",
             "docling://users/acme/alice/sessions/chat",
             "--json",
         ]
     )
     assert code == 1 and "user does not match" in capsys.readouterr().err
-    assert _run(capsys, tmp_path, "session", "close", "chat", "--json")[0] == 0
+    assert _run(capsys, tmp_path, "session", "close", "--id", "chat", "--json")[0] == 0
     code, _, error = _run(
         capsys,
         tmp_path,
         "session",
         "append",
+        "--id",
         "chat",
+        "--text",
         "too late",
         "--kind",
         "turn",
@@ -154,7 +177,9 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
     assert code == 0 and len(json.loads(output)) == 1
     code, output, _ = _run(capsys, tmp_path, "memory", "worker", "--once", "--json")
     assert code == 0 and json.loads(output)["status"] == "completed"
-    code, output, _ = _run(capsys, tmp_path, "session", "jobs", "chat", "--json")
+    code, output, _ = _run(
+        capsys, tmp_path, "session", "jobs", "--id", "chat", "--json"
+    )
     assert code == 0 and {job["status"] for job in json.loads(output)} == {
         "completed",
         "superseded",
@@ -164,7 +189,7 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
     assert code == 0 and proposal["status"] == "proposed"
     uri = proposal["uri"]
     code, output, _ = _run(
-        capsys, tmp_path, "library", "grep", "concise", "--uri", uri, "--json"
+        capsys, tmp_path, "library", "grep", "--term", "concise", "--uri", uri, "--json"
     )
     assert code == 0 and not output
     code, output, _ = _run(
@@ -173,16 +198,22 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
     assert code == 0 and len(json.loads(output)) == 1
     code, output, _ = _run(capsys, tmp_path, "memory", "list", "--until", day, "--json")
     assert code == 0 and len(json.loads(output)) == 1
-    assert _run(capsys, tmp_path, "memory", "accept", uri, "--json")[0] == 0
+    assert _run(capsys, tmp_path, "memory", "accept", "--uri", uri, "--json")[0] == 0
     code, output, _ = _run(
-        capsys, tmp_path, "library", "grep", "concise", "--uri", uri, "--json"
+        capsys, tmp_path, "library", "grep", "--term", "concise", "--uri", uri, "--json"
     )
     assert code == 0 and output
-    code, output, _ = _run(capsys, tmp_path, "memory", "search", "concise", "--json")
+    code, output, _ = _run(
+        capsys, tmp_path, "memory", "search", "--query", "concise", "--json"
+    )
     assert code == 0 and json.loads(output)[0]["uri"] == uri
-    code, output, _ = _run(capsys, tmp_path, "memory", "recall", "concise", "--json")
+    code, output, _ = _run(
+        capsys, tmp_path, "memory", "recall", "--query", "concise", "--json"
+    )
     assert code == 0 and len(json.loads(output)) == 1
-    code, output, _ = _run(capsys, tmp_path, "memory", "recall", "concise", "--json")
+    code, output, _ = _run(
+        capsys, tmp_path, "memory", "recall", "--query", "concise", "--json"
+    )
     assert code == 0 and json.loads(output) == []
     code, output, _ = _run(capsys, tmp_path, "overview", "--json")
     counts = json.loads(output)
@@ -192,16 +223,16 @@ def test_session_lifecycle_listing_and_memory_review(tmp_path, capsys, monkeypat
         and counts["counts"]["memories"] == 1
     )
     assert counts["counts"]["memory_jobs"] >= 1
-    assert _run(capsys, tmp_path, "memory", "delete", uri, "--json")[0] == 0
+    assert _run(capsys, tmp_path, "memory", "delete", "--uri", uri, "--json")[0] == 0
     code, output, _ = _run(
         capsys, tmp_path, "memory", "list", "--status", "deleted", "--json"
     )
     assert code == 0 and len(json.loads(output)) == 1
     code, output, _ = _run(
-        capsys, tmp_path, "library", "grep", "concise", "--uri", uri, "--json"
+        capsys, tmp_path, "library", "grep", "--term", "concise", "--uri", uri, "--json"
     )
     assert code == 0 and not output
-    assert _run(capsys, tmp_path, "memory", "purge", uri, "--json")[0] == 0
+    assert _run(capsys, tmp_path, "memory", "purge", "--uri", uri, "--json")[0] == 0
     code, output, _ = _run(capsys, tmp_path, "memory", "list", "--json")
     assert code == 0 and json.loads(output) == []
 
@@ -212,7 +243,9 @@ def test_manual_memory_filters_and_shared_tenant_scope(tmp_path, capsys):
         tmp_path,
         "memory",
         "create",
+        "--kind",
         "concept",
+        "--claim",
         "Karoo Basin",
         "--accepted",
         "--json",
@@ -228,7 +261,15 @@ def test_manual_memory_filters_and_shared_tenant_scope(tmp_path, capsys):
     )
     assert code == 0 and len(json.loads(output)) == 1
     code, output, _ = _run(
-        capsys, tmp_path, "memory", "correct", uri, "Karoo Supergroup", "--json"
+        capsys,
+        tmp_path,
+        "memory",
+        "correct",
+        "--uri",
+        uri,
+        "--claim",
+        "Karoo Supergroup",
+        "--json",
     )
     assert code == 0 and json.loads(output)["claim"] == "Karoo Supergroup"
     code = main(
